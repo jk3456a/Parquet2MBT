@@ -27,6 +27,9 @@ testdata/output/*.bin
 testdata/output/*.idx
 testdata/logs/*.log
 
+# Large test data files (>100MB)
+testdata/data/*.parquet
+
 # Temporary files
 *.tmp
 *.temp
