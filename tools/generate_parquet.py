@@ -73,9 +73,12 @@ class ParquetGenerator:
             }
         }
     
-    def generate_content_text(self, target_length: int = None) -> str:
+    def generate_content_text(self, target_length: int = None, fixed_length: int = None) -> str:
         """生成类似学术论文的内容文本"""
-        if target_length is None:
+        if fixed_length is not None:
+            # 使用固定长度
+            target_length = fixed_length
+        elif target_length is None:
             # 基于统计信息随机选择长度
             stats = self.template_stats['column_stats']['content']
             # 使用对数正态分布模拟真实的长度分布
@@ -224,12 +227,14 @@ class ParquetGenerator:
             }
             return json.dumps(meta)
     
-    def generate_dataframe(self, num_rows: int = None) -> pd.DataFrame:
+    def generate_dataframe(self, num_rows: int = None, content_length: int = None) -> pd.DataFrame:
         """生成完整的 DataFrame"""
         if num_rows is None:
             num_rows = self.template_stats['num_rows']
         
         print(f"生成 {num_rows:,} 行数据...")
+        if content_length is not None:
+            print(f"每条content固定长度: {content_length:,} 字符")
         
         data = {
             'content': [],
@@ -242,7 +247,7 @@ class ParquetGenerator:
             if i % 1000 == 0:
                 print(f"  进度: {i:,}/{num_rows:,} ({i/num_rows*100:.1f}%)")
             
-            data['content'].append(self.generate_content_text())
+            data['content'].append(self.generate_content_text(fixed_length=content_length))
             data['dataset_index'].append(self.generate_dataset_index())
             data['uid'].append(self.generate_uid())
             data['meta'].append(self.generate_meta())
@@ -274,11 +279,62 @@ class ParquetGenerator:
         # 显示文件信息
         file_size = os.path.getsize(output_path)
         print(f"文件大小: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+        return file_size
+    
+    def generate_multiple_files(self, base_output_path: str, num_files: int, 
+                               total_rows: int, content_length: int = None,
+                               compression: str = 'snappy', row_group_size: int = 100):
+        """生成多个 Parquet 文件"""
+        print(f"生成 {num_files} 个文件，总共 {total_rows:,} 行数据")
+        
+        # 计算每个文件的行数
+        rows_per_file = total_rows // num_files
+        remaining_rows = total_rows % num_files
+        
+        total_size = 0
+        file_paths = []
+        
+        for i in range(num_files):
+            # 计算当前文件的行数
+            current_rows = rows_per_file
+            if i < remaining_rows:
+                current_rows += 1
+            
+            # 生成文件名
+            base_name, ext = os.path.splitext(base_output_path)
+            if num_files == 1:
+                file_path = base_output_path
+            else:
+                file_path = f"{base_name}_{i+1:03d}{ext}"
+            
+            print(f"\n=== 生成第 {i+1}/{num_files} 个文件 ===")
+            print(f"文件路径: {file_path}")
+            print(f"行数: {current_rows:,}")
+            
+            # 生成数据
+            df = self.generate_dataframe(current_rows, content_length)
+            
+            # 保存文件
+            file_size = self.save_parquet(df, file_path, compression, row_group_size)
+            total_size += file_size
+            file_paths.append(file_path)
+        
+        print(f"\n=== 所有文件生成完成 ===")
+        print(f"总文件数: {num_files}")
+        print(f"总行数: {total_rows:,}")
+        print(f"总大小: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)")
+        print("生成的文件:")
+        for path in file_paths:
+            print(f"  - {path}")
+        
+        return file_paths
 
 def main():
     parser = argparse.ArgumentParser(description='生成测试用的 Parquet 文件')
     parser.add_argument('--output', '-o', required=True, help='输出文件路径')
-    parser.add_argument('--rows', '-r', type=int, default=10000, help='生成的行数')
+    parser.add_argument('--rows', '-r', type=int, default=10000, help='生成的总行数')
+    parser.add_argument('--content-length', type=int, help='每条content的固定长度（字符数）')
+    parser.add_argument('--num-files', '-n', type=int, default=1, help='生成的文件数量')
     parser.add_argument('--template', '-t', help='模板文件路径（用于分析统计信息）')
     parser.add_argument('--compression', '-c', default='snappy', 
                        choices=['snappy', 'gzip', 'brotli', 'lz4'],
@@ -288,6 +344,19 @@ def main():
     parser.add_argument('--seed', type=int, help='随机种子')
     
     args = parser.parse_args()
+    
+    # 参数验证
+    if args.num_files < 1:
+        print("错误: 文件数量必须大于0")
+        sys.exit(1)
+    
+    if args.rows < 1:
+        print("错误: 行数必须大于0")
+        sys.exit(1)
+    
+    if args.content_length is not None and args.content_length < 0:
+        print("错误: content长度不能为负数")
+        sys.exit(1)
     
     # 设置随机种子
     if args.seed:
@@ -309,25 +378,45 @@ def main():
     # 创建生成器
     generator = ParquetGenerator(template_stats)
     
-    # 生成数据
-    df = generator.generate_dataframe(args.rows)
+    # 显示配置信息
+    print("=== 生成配置 ===")
+    print(f"总行数: {args.rows:,}")
+    print(f"文件数量: {args.num_files}")
+    if args.content_length is not None:
+        print(f"Content固定长度: {args.content_length:,} 字符")
+    else:
+        print("Content长度: 随机（基于模板统计）")
+    print(f"压缩算法: {args.compression}")
+    print(f"Row Group大小: {args.row_group_size}")
+    if args.seed:
+        print(f"随机种子: {args.seed}")
+    print()
     
-    # 保存文件
-    generator.save_parquet(df, args.output, args.compression, args.row_group_size)
-    
-    print("\n=== 生成完成 ===")
-    print(f"输出文件: {args.output}")
-    print(f"行数: {len(df):,}")
-    print(f"列数: {len(df.columns)}")
-    
-    # 显示样本数据
-    print("\n样本数据:")
-    for i, row in df.head(3).iterrows():
-        print(f"  行 {i}:")
-        print(f"    content: {str(row['content'])[:100]}...")
-        print(f"    dataset_index: {row['dataset_index']}")
-        print(f"    uid: {row['uid']}")
-        print(f"    meta: {row['meta']}")
+    # 生成文件
+    if args.num_files == 1:
+        # 生成单个文件
+        df = generator.generate_dataframe(args.rows, args.content_length)
+        generator.save_parquet(df, args.output, args.compression, args.row_group_size)
+        
+        print("\n=== 生成完成 ===")
+        print(f"输出文件: {args.output}")
+        print(f"行数: {len(df):,}")
+        print(f"列数: {len(df.columns)}")
+        
+        # 显示样本数据
+        print("\n样本数据:")
+        for i, row in df.head(3).iterrows():
+            print(f"  行 {i}:")
+            print(f"    content: {str(row['content'])[:100]}...")
+            print(f"    dataset_index: {row['dataset_index']}")
+            print(f"    uid: {row['uid']}")
+            print(f"    meta: {row['meta']}")
+    else:
+        # 生成多个文件
+        file_paths = generator.generate_multiple_files(
+            args.output, args.num_files, args.rows, args.content_length,
+            args.compression, args.row_group_size
+        )
 
 if __name__ == "__main__":
     main()
