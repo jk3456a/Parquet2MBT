@@ -40,6 +40,10 @@ impl Metrics {
     }
 
     pub fn uptime_secs(&self) -> u64 { self.start.elapsed().as_secs() }
+    
+    pub fn uptime_millis(&self) -> u128 { self.start.elapsed().as_millis() }
+    
+    pub fn elapsed_precise(&self) -> f64 { self.start.elapsed().as_secs_f64() }
 
     pub fn inc_input_bytes(&self, v: u64) { self.input_bytes_total.fetch_add(v, Ordering::Relaxed); }
     pub fn inc_output_bytes(&self, v: u64) { self.output_bytes_total.fetch_add(v, Ordering::Relaxed); }
@@ -95,12 +99,16 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
                     let tps = (delta_tokens as f64) / (secs as f64);
                     let rps = (delta_records as f64) / (secs as f64);
 
-                    let total_ns = reader_ns + preprocess_ns + tokenize_ns + write_ns + index_ns;
-                    let pct = |x: u64| -> f64 { if total_ns==0 { 0.0 } else { (x as f64) * 100.0 / (total_ns as f64) } };
+                    // 计算基于墙钟时间的实际吞吐量
+                    let uptime_secs = metrics.uptime_secs();
+                    let overall_tokens_per_sec = if uptime_secs > 0 { tokens as f64 / uptime_secs as f64 } else { 0.0 };
+                    let overall_records_per_sec = if uptime_secs > 0 { records as f64 / uptime_secs as f64 } else { 0.0 };
+                    let overall_read_mbps = if uptime_secs > 0 { (input as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
+                    let overall_convert_mbps = if uptime_secs > 0 { (output as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
 
                     tracing::info!(
                         component = "metrics",
-                        uptime_secs = metrics.uptime_secs(),
+                        uptime_secs = uptime_secs,
                         input_bytes_total = input,
                         output_bytes_total = output,
                         files_total = files,
@@ -108,20 +116,16 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
                         records_total = records,
                         tokens_total = tokens,
                         errors_total = errors,
-                        read_mb_per_sec = format!("{:.2}", in_mbps).as_str(),
-                        convert_mb_per_sec = format!("{:.2}", out_mbps).as_str(),
-                        tokens_per_sec = format!("{:.0}", tps).as_str(),
-                        records_per_sec = format!("{:.0}", rps).as_str(),
-                        reader_ms_total = format!("{:.1}", reader_ns as f64 / 1e6).as_str(),
-                        preprocess_ms_total = format!("{:.1}", preprocess_ns as f64 / 1e6).as_str(),
-                        tokenize_ms_total = format!("{:.1}", tokenize_ns as f64 / 1e6).as_str(),
-                        write_ms_total = format!("{:.1}", write_ns as f64 / 1e6).as_str(),
-                        index_ms_total = format!("{:.1}", index_ns as f64 / 1e6).as_str(),
-                        reader_pct = format!("{:.1}", pct(reader_ns)).as_str(),
-                        preprocess_pct = format!("{:.1}", pct(preprocess_ns)).as_str(),
-                        tokenize_pct = format!("{:.1}", pct(tokenize_ns)).as_str(),
-                        write_pct = format!("{:.1}", pct(write_ns)).as_str(),
-                        index_pct = format!("{:.1}", pct(index_ns)).as_str(),
+                        // 基于墙钟时间的实际吞吐量
+                        overall_tokens_per_sec = format!("{:.0}", overall_tokens_per_sec).as_str(),
+                        overall_records_per_sec = format!("{:.0}", overall_records_per_sec).as_str(),
+                        overall_read_mb_per_sec = format!("{:.2}", overall_read_mbps).as_str(),
+                        overall_convert_mb_per_sec = format!("{:.2}", overall_convert_mbps).as_str(),
+                        // 间隔内的瞬时吞吐量
+                        interval_tokens_per_sec = format!("{:.0}", tps).as_str(),
+                        interval_records_per_sec = format!("{:.0}", rps).as_str(),
+                        interval_read_mb_per_sec = format!("{:.2}", in_mbps).as_str(),
+                        interval_convert_mb_per_sec = format!("{:.2}", out_mbps).as_str(),
                         "metrics snapshot"
                     );
                 }

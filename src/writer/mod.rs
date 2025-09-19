@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crate::index::IdxDType;
 
