@@ -1,0 +1,32 @@
+[package]
+name = "parquet2mbt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1.10"
+crossbeam-channel = "0.5"
+walkdir = "2"
+glob = "0.3"
+num_cpus = "1"
+
+# Arrow/Parquet 与 Tokenizers
+arrow = { version = "53", features = ["ipc"] }
+arrow-array = "53"
+arrow-schema = "53"
+parquet = "53"
+tokenizers = { version = "0.19", default-features = false, features = ["http","onig"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+
+
