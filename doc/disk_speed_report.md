@@ -1,14 +1,36 @@
 ## 磁盘 I/O 性能简报（顺序读写）
 
-- **结论**：顺序写入约 3.9 GB/s；顺序读取约 1.1 GB/s。
-- **测试时间**：2025-09-18
+- **结论**：
+  - **磁盘写入**：最佳性能 4.2 GB/s（2MB块），性能在2MB块大小时达到峰值
+  - **磁盘读取**：最佳性能 6.3 GB/s（32MB块），随块大小增加持续提升
+  - **内存基准**：写入 1.8 GB/s，读取 7.0 GB/s（4MB块最佳）
+- **测试时间**：2025-09-22（更新）
 
-### 测试结果
+### 详细测试结果
 
-| 指标 | 吞吐 | 耗时 | 样本大小 | 块大小 | 并发 |
+#### 磁盘性能（NVMe SSD + O_DIRECT）
+
+| 块大小 | 写入吞吐 | 写入耗时 | 读取吞吐 | 读取耗时 | 样本大小 |
 | --- | --- | --- | --- | --- | --- |
-| 顺序写入（O_DIRECT） | 3.9 GB/s | 0.273 s | 1 GiB | 1 MiB | 单线程 |
-| 顺序读取（O_DIRECT） | 1.1 GB/s | 0.994 s | 1 GiB | 1 MiB | 单线程 |
+| 1 MB | 4.0 GB/s | 0.268 s | 0.86 GB/s | 1.246 s | 1 GiB |
+| 2 MB | **4.2 GB/s** | 0.258 s | 0.80 GB/s | 1.344 s | 1 GiB |
+| 4 MB | 3.9 GB/s | 0.273 s | 4.3 GB/s | 0.248 s | 1 GiB |
+| 8 MB | 3.4 GB/s | 0.312 s | 5.4 GB/s | 0.198 s | 1 GiB |
+| 16 MB | 2.2 GB/s | 0.493 s | 6.0 GB/s | 0.178 s | 1 GiB |
+| 32 MB | 1.9 GB/s | 0.566 s | **6.3 GB/s** | 0.171 s | 1 GiB |
+| 64 MB | 1.9 GB/s | 0.566 s | 6.0 GB/s | 0.179 s | 1 GiB |
+
+#### 内存性能基准（/dev/shm）
+
+| 块大小 | 写入吞吐 | 写入耗时 | 读取吞吐 | 读取耗时 | 样本大小 |
+| --- | --- | --- | --- | --- | --- |
+| 1 MB | 1.8 GB/s | 0.594 s | 5.9 GB/s | 0.183 s | 1 GiB |
+| 2 MB | 1.8 GB/s | 0.604 s | 6.8 GB/s | 0.158 s | 1 GiB |
+| 4 MB | 1.8 GB/s | 0.603 s | **7.0 GB/s** | 0.153 s | 1 GiB |
+| 8 MB | 1.8 GB/s | 0.611 s | 6.7 GB/s | 0.160 s | 1 GiB |
+| 16 MB | 1.6 GB/s | 0.658 s | 5.4 GB/s | 0.198 s | 1 GiB |
+| 32 MB | 1.6 GB/s | 0.682 s | 4.3 GB/s | 0.249 s | 1 GiB |
+| 64 MB | 1.6 GB/s | 0.684 s | 4.2 GB/s | 0.256 s | 1 GiB |
 
 ### 环境与硬件
 
@@ -19,22 +41,67 @@
 - **内核**：Linux 5.15.0-94-generic
 - **磁盘使用率**：约 99%（可用约 220 GiB）
 
+
+### 性能分析
+
+#### 关键发现
+
+1. **磁盘写入性能**：
+   - 在2MB块大小时达到峰值（4.2 GB/s）
+   - 块大小超过2MB后性能显著下降
+   - 可能受限于SSD控制器的写入缓冲区大小
+
+2. **磁盘读取性能**：
+   - 随块大小增加持续提升，在32MB时达到峰值（6.3 GB/s）
+   - 读取性能明显优于写入性能
+   - 大块读取能更好地利用NVMe的并行通道
+
+3. **内存vs磁盘对比**：
+   - **写入**：磁盘峰值（4.2 GB/s）> 内存（1.8 GB/s），这可能是因为：
+     - 磁盘使用O_DIRECT绕过页缓存
+     - 内存测试受限于tmpfs的实现
+   - **读取**：内存峰值（7.0 GB/s）> 磁盘（6.3 GB/s），符合预期
+
+4. **块大小优化建议**：
+   - **写入密集型应用**：推荐使用2MB块大小
+   - **读取密集型应用**：推荐使用16-32MB块大小
+   - **混合负载**：推荐使用4-8MB块大小作为平衡点
+
 ### 测试方法（可复现）
 
+#### 磁盘测试
 - 工具：`dd`
 - 写入命令：
   ```bash
-  dd if=/dev/zero of=/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/disk_speed_test.tmp bs=1M count=1024 oflag=direct
+  dd if=/dev/zero of=/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/disk_speed_test.tmp bs={BLOCK_SIZE} count={COUNT} oflag=direct
   ```
 - 读取命令：
   ```bash
-  dd if=/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/disk_speed_test.tmp of=/dev/null bs=1M iflag=direct
+  dd if=/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/disk_speed_test.tmp of=/dev/null bs={BLOCK_SIZE} iflag=direct
   ```
-- 说明：O_DIRECT 绕过页缓存，更贴近裸顺序 I/O 能力；测试后临时文件已删除。
+
+#### 内存基准测试
+- 写入命令：
+  ```bash
+  dd if=/dev/zero of=/dev/shm/memory_speed_test.tmp bs={BLOCK_SIZE} count={COUNT}
+  ```
+- 读取命令：
+  ```bash
+  dd if=/dev/shm/memory_speed_test.tmp of=/dev/null bs={BLOCK_SIZE}
+  ```
 
 ### 说明与后续
 
 - 以上为单线程顺序读写结果；实际业务还会受随机访问、并发度、压缩/解压、网络等因素影响。
-- 如需更全面的评估，可采用 `fio` 在不同块大小（4 KiB ~ 1 MiB）、队列深度（Q1 ~ Q64）以及随机/混合读写下生成吞吐与 P95/P99 延迟曲线。
+- 如需更全面的评估，可采用 `fio` 在不同块大小（4 KiB ~ 64 MiB）、队列深度（Q1 ~ Q64）以及随机/混合读写下生成吞吐与 P95/P99 延迟曲线。
+- 建议针对具体应用场景选择合适的块大小以获得最佳性能。
 
+### 总结
 
+本次扩展测试通过系统性地测试不同块大小（1MB-64MB）的性能表现，发现了以下关键规律：
+
+1. **写入性能曲线**：在2MB块大小时达到峰值后快速下降
+2. **读取性能曲线**：随块大小增加而提升，在32MB时趋于稳定  
+3. **内存基准对比**：提供了性能上限参考，帮助评估磁盘I/O效率
+
+这些数据为后续的存储系统优化提供了重要的性能基准和块大小选择依据。
