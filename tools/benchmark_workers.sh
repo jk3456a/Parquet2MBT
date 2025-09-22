@@ -10,7 +10,7 @@ TOKENIZER="${TOKENIZER:-/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/testdat
 OUTPUT_DIR="${OUTPUT_DIR:-/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/testdata/benchmark}"
 BINARY="${BINARY:-./target/release/parquet2mbt}"
 NO_WRITE="${NO_WRITE:-true}"
-TIMEOUT_SEC="${TIMEOUT_SEC:-900}"
+TIMEOUT_SEC="${TIMEOUT_SEC:-180}"
 REPEAT="${REPEAT:-1}"
 
 # 扫描维度
@@ -22,8 +22,8 @@ TS=$(date +%Y%m%d_%H%M%S)
 RESULTS_CSV="$OUTPUT_DIR/windtunnel_w_bs_${TS}.csv"
 RESULTS_LOG="$OUTPUT_DIR/windtunnel_w_bs_${TS}.log"
 
-# CSV 表头
-echo "workers,batch_size,elapsed_secs,overall_tokens_per_sec,overall_records_per_sec,read_avg_mb_per_sec,convert_avg_mb_per_sec,total_tokens,total_records,read_workers,tokenize_workers,write_workers" > "$RESULTS_CSV"
+# CSV 表头（仅使用周期 metrics，不依赖 summary）
+echo "workers,batch_size,uptime_secs,overall_tokens_per_sec,overall_records_per_sec,overall_read_mb_per_sec,overall_convert_mb_per_sec,interval_tokens_per_sec,interval_records_per_sec,interval_read_mb_per_sec,interval_convert_mb_per_sec,tokens_total,records_total,read_workers,tokenize_workers,write_workers" > "$RESULTS_CSV"
 
 echo "=== 风洞实验：workers x batch_size ===" | tee "$RESULTS_LOG"
 echo "开始时间: $(date)" | tee -a "$RESULTS_LOG"
@@ -49,18 +49,45 @@ for bs in "${BATCH_SIZES[@]}"; do
         --output-prefix "$output_prefix" \
         --batch-size "$bs" \
         --workers "$workers" \
-        --metrics-interval 0)
+        --metrics-interval 10)
       if [ "$NO_WRITE" = "true" ]; then
         cmd+=(--no-write)
       fi
 
       log_file="$OUTPUT_DIR/run_bs${bs}_w${workers}_r${r}.log"
-      if ! timeout "$TIMEOUT_SEC" "${cmd[@]}" 2>&1 | tee "$log_file"; then
-        echo "  运行超时/失败: bs=$bs workers=$workers run#$r" | tee -a "$RESULTS_LOG"
+      # 不再用 tee 管道，避免 timeout 信号只送到管道首进程导致残留子进程
+      # 前台运行会导致 Ctrl-C 直接打断脚本而无法清理；
+      # 这里将 timeout 放到后台并用 trap 转发信号，实现优雅退出
+      set +e
+      timeout --foreground --signal=INT --kill-after=5s "$TIMEOUT_SEC" "${cmd[@]}" &> "$log_file" &
+      run_pid=$!
+      on_int() {
+        echo "  捕获 SIGINT，正在优雅停止子进程(pid=$run_pid) ..." | tee -a "$RESULTS_LOG"
+        kill -INT "$run_pid" 2>/dev/null || true
+        sleep 1
+        kill -TERM "$run_pid" 2>/dev/null || true
+      }
+      on_term() {
+        echo "  捕获 SIGTERM，正在优雅停止子进程(pid=$run_pid) ..." | tee -a "$RESULTS_LOG"
+        kill -TERM "$run_pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$run_pid" 2>/dev/null || true
+      }
+      trap on_int INT
+      trap on_term TERM
+      wait "$run_pid"
+      run_rc=$?
+      trap - INT TERM
+      set -e
+      if [ $run_rc -ne 0 ]; then
+        echo "  运行超时/失败: bs=$bs workers=$workers run#$r (rc=$run_rc)" | tee -a "$RESULTS_LOG"
       fi
 
       end_time=$(date +%s)
       wall_time=$((end_time - start_time))
+
+      # 简短展示末尾日志便于人工核验
+      tail -n 5 "$log_file" | sed 's/^/    /' | tee -a "$RESULTS_LOG"
 
       # 解析配置行（读取/分词/写入 worker 配比）
       cfg_line=$(grep "Multi-stage pipeline configuration" "$log_file" | head -1 || true)
@@ -68,23 +95,31 @@ for bs in "${BATCH_SIZES[@]}"; do
       tokenize_workers=$(echo "$cfg_line" | grep -o 'tokenize_workers=[0-9]*' | cut -d'=' -f2)
       write_workers=$(echo "$cfg_line" | grep -o 'write_workers=[0-9]*' | cut -d'=' -f2)
 
-      # 解析 summary 行
-      summary_line=$(grep "run summary" "$log_file" | tail -1 || true)
-      if [ -n "$summary_line" ]; then
-        elapsed_secs=$(echo "$summary_line" | grep -o 'elapsed_secs="[0-9.]*"' | cut -d'"' -f2)
-        overall_tokens_per_sec=$(echo "$summary_line" | grep -o 'overall_tokens_per_sec="[0-9.]*"' | cut -d'"' -f2)
-        overall_records_per_sec=$(echo "$summary_line" | grep -o 'overall_records_per_sec="[0-9.]*"' | cut -d'"' -f2)
-        read_avg_mb_per_sec=$(echo "$summary_line" | grep -o 'read_avg_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
-        convert_avg_mb_per_sec=$(echo "$summary_line" | grep -o 'convert_avg_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
-        total_tokens=$(echo "$summary_line" | grep -o 'tokens_total=[0-9]*' | cut -d'=' -f2)
-        total_records=$(echo "$summary_line" | grep -o 'records_total=[0-9]*' | cut -d'=' -f2)
+      # 解析最后一条 metrics snapshot（稳定阶段）
+      metrics_line=$(grep -F 'component="metrics"' "$log_file" | tail -1 || true)
+      # 若本地日志仍未命中，回退到总日志（stdout 已经打印过）
+      if [ -z "${metrics_line:-}" ] && [ -f "$RESULTS_LOG" ]; then
+        metrics_line=$(grep -F 'component="metrics"' "$RESULTS_LOG" | tail -1 || true)
+      fi
+      if [ -n "$metrics_line" ]; then
+        uptime_secs=$(echo "$metrics_line" | grep -o 'uptime_secs=[0-9]*' | cut -d'=' -f2)
+        overall_tokens_per_sec=$(echo "$metrics_line" | grep -o 'overall_tokens_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        overall_records_per_sec=$(echo "$metrics_line" | grep -o 'overall_records_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        overall_read_mb_per_sec=$(echo "$metrics_line" | grep -o 'overall_read_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        overall_convert_mb_per_sec=$(echo "$metrics_line" | grep -o 'overall_convert_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        interval_tokens_per_sec=$(echo "$metrics_line" | grep -o 'interval_tokens_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        interval_records_per_sec=$(echo "$metrics_line" | grep -o 'interval_records_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        interval_read_mb_per_sec=$(echo "$metrics_line" | grep -o 'interval_read_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        interval_convert_mb_per_sec=$(echo "$metrics_line" | grep -o 'interval_convert_mb_per_sec="[0-9.]*"' | cut -d'"' -f2)
+        tokens_total=$(echo "$metrics_line" | grep -o 'tokens_total=[0-9]*' | cut -d'=' -f2)
+        records_total=$(echo "$metrics_line" | grep -o 'records_total=[0-9]*' | cut -d'=' -f2)
 
-        echo "$workers,$bs,$elapsed_secs,$overall_tokens_per_sec,$overall_records_per_sec,$read_avg_mb_per_sec,$convert_avg_mb_per_sec,$total_tokens,$total_records,${read_workers:-},${tokenize_workers:-},${write_workers:-}" >> "$RESULTS_CSV"
+        echo "$workers,$bs,${uptime_secs:-},${overall_tokens_per_sec:-},${overall_records_per_sec:-},${overall_read_mb_per_sec:-},${overall_convert_mb_per_sec:-},${interval_tokens_per_sec:-},${interval_records_per_sec:-},${interval_read_mb_per_sec:-},${interval_convert_mb_per_sec:-},${tokens_total:-},${records_total:-},${read_workers:-},${tokenize_workers:-},${write_workers:-}" >> "$RESULTS_CSV"
 
-        echo "  用时=${elapsed_secs}s, tokens/s=${overall_tokens_per_sec}, convert_MB/s=${convert_avg_mb_per_sec}, 墙钟=${wall_time}s" | tee -a "$RESULTS_LOG"
+        echo "  稳定(uptime=${uptime_secs:-?}s): tokens/s=${overall_tokens_per_sec:-?}, interval_tokens/s=${interval_tokens_per_sec:-?}, convert_MB/s=${overall_convert_mb_per_sec:-?}, 墙钟=${wall_time}s" | tee -a "$RESULTS_LOG"
       else
-        echo "$workers,$bs,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,${read_workers:-},${tokenize_workers:-},${write_workers:-}" >> "$RESULTS_CSV"
-        echo "  错误: 未找到 summary 行 (可能超时)" | tee -a "$RESULTS_LOG"
+        echo "$workers,$bs,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,${read_workers:-},${tokenize_workers:-},${write_workers:-}" >> "$RESULTS_CSV"
+        echo "  错误: 未找到 metrics snapshot 行 (可能超时)" | tee -a "$RESULTS_LOG"
       fi
 
       # 清理

@@ -18,6 +18,7 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .with_level(true)
+        .with_ansi(false) // 禁用ANSI颜色，避免日志中出现控制字符
         .compact()
         .init();
 }
