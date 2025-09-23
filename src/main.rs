@@ -8,7 +8,6 @@ mod writer;
 mod index;
 mod pipeline;
 mod metrics;
-
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 

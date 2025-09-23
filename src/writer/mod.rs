@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::index::IdxDType;
 
+pub mod rotating;
+pub use rotating::RotatingWriterPool;
+
 pub struct BinWriter {
     f: BufWriter<File>,
     pub total_tokens: u64,
