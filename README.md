@@ -11,6 +11,66 @@
 - 🛡️ **可靠性**: 支持断点续传、原子写入、错误恢复
 - 🎯 **兼容性**: 输出格式完全兼容Megatron-LM的IndexedDataset
 
+## 性能基准
+
+### 测试环境
+- **硬件**: 128核CPU + 8×RTX4090 GPU + 高速SSD
+- **数据集**: zh__CCI4.0-M2-Base-v1 (250个Parquet文件)
+- **分词器**: 标准中文分词器 (~100K词汇表)
+
+### 性能表现
+- **峰值性能**: **155.2M tokens/s** (稳定状态)
+- **最优配置**: 4读取 + 122分词 + 2写入 workers
+- **I/O吞吐量**: 517 MB/s 输入，580 MB/s 输出
+
+### 时间估算
+
+| 数据规模 | Token数量 | 预估转换时间 | 说明 |
+|----------|-----------|-------------|------|
+| 小规模   | 1B tokens | ~6.4秒      | 单本小说/文档集 |
+| 中规模   | 10B tokens | ~1.1分钟    | 中型语料库 |
+| 大规模   | 100B tokens | ~10.8分钟   | 大型预训练数据集 |
+| 超大规模 | 1T tokens | ~1.8小时    | 超大规模语料库 |
+
+**注意**: 实际转换时间受以下因素影响：
+- 硬件配置（CPU核数、内存带宽、存储速度）
+- 数据特征（文本长度、压缩比、文件数量）
+- 分词器复杂度（词汇表大小、算法类型）
+- 系统负载（其他进程占用、I/O竞争）
+
+### 🤖 智能Worker分配
+
+**无需手动配置！** 系统会根据CPU核心数自动选择最优的worker分配策略：
+
+```bash
+# 系统会自动检测CPU核心数并应用最优配置
+./target/release/parquet2mbt \
+  --input-dir /data/corpus \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /output/corpus
+```
+
+**分层自适应分配策略**（基于性能测试数据）:
+- **0-32核**: 1读取 + 1写入 + 剩余分词
+- **33-64核**: 2读取 + 1写入 + 剩余分词  
+- **65-96核**: 3读取 + 2写入 + 剩余分词
+- **97-128核**: 4读取 + 2写入 + 剩余分词
+- **128+核**: 按比例分配（约3%读取 + 1.5%写入 + 95.5%分词）
+
+**高级用户** 仍可手动指定worker数量来覆盖自动配置：
+```bash
+# 手动指定（仅在特殊需求时使用）
+./target/release/parquet2mbt \
+  --input-dir /data/corpus \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /output/corpus \
+  --read-workers 4 \
+  --tokenize-workers 122 \
+  --write-workers 2
+```
+
 ## 快速开始
 
 ### 安装
@@ -35,12 +95,12 @@ cargo build --release
   --output-prefix /data/out/corpus
 ```
 
-**注意**: 新版本已优化默认配置，无需手动指定参数，系统会自动使用最佳配置：
-- 总线程数：CPU核数
-- 读取线程：4个
-- 分词线程：CPU核数-6
-- 写入线程：2个
-- 批处理大小：8192
+**注意**: 新版本采用智能worker分配，无需手动指定参数，系统会根据CPU核心数自动选择最优配置：
+- **总线程数**: CPU核数
+- **读取线程**: 2-4个（根据CPU核数自适应）
+- **分词线程**: 大部分核心（80-90%）
+- **写入线程**: 1-2个（根据CPU核数自适应）
+- **批处理大小**: 8192
 
 ## 主要参数
 
@@ -208,4 +268,5 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 
 - [产品需求文档 (PRD)](doc/PRD.md) - 详细的功能规格和架构设计
 - [用户指南](doc/user_guide.md) - 详细的使用说明和参数解释
-- [性能报告](doc/disk_speed_report.md) - 性能测试和优化建议
+- [风洞测试分析报告](doc/windtunnel_analysis_report.md) - 完整的性能测试和优化分析
+- [性能报告](doc/disk_speed_report.md) - 存储性能测试和建议

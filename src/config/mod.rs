@@ -28,13 +28,38 @@ pub struct Config {
 }
 
 impl Config {
+    /// 基于测试数据的智能worker分配策略 - 分层配置
+    fn calculate_optimal_workers(total_workers: usize) -> (usize, usize, usize) {
+        let (read_workers, write_workers) = match total_workers {
+            // 0-32核: 1读取 + 1写入
+            0..=32 => (1, 1),
+            // 32-64核: 2读取 + 1写入  
+            33..=64 => (2, 1),
+            // 64-96核: 3读取 + 2写入
+            65..=96 => (3, 2),
+            // 96-128核: 4读取 + 2写入
+            97..=128 => (4, 2),
+            // 128+核: 按2:64:1比例分配
+            _ => {
+                // 对于超大核心数，使用固定比例：约3%读取，1.5%写入，95.5%分词
+                let read_w = ((total_workers as f64 * 0.03).round() as usize).max(2).min(8);
+                let write_w = ((total_workers as f64 * 0.015).round() as usize).max(1).min(4);
+                (read_w, write_w)
+            }
+        };
+        
+        let tokenize_workers = total_workers.saturating_sub(read_workers).saturating_sub(write_workers).max(1);
+        
+        (read_workers, tokenize_workers, write_workers)
+    }
+
     pub fn from_args(a: &Args) -> Result<Self> {
         if a.output_prefix.is_empty() { bail!("--output-prefix 不能为空"); }
         if a.input_dir.is_empty() { bail!("--input-dir 不能为空"); }
         if a.tokenizer.is_empty() { bail!("--tokenizer 不能为空"); }
         let workers = a.workers.unwrap_or_else(|| num_cpus::get());
         
-        // 验证worker参数的合理性
+        // 验证手动指定的worker参数
         if let Some(read_w) = a.read_workers {
             if read_w == 0 { bail!("--read-workers 必须大于0"); }
         }
@@ -45,12 +70,30 @@ impl Config {
             if write_w == 0 { bail!("--write-workers 必须大于0"); }
         }
         
-        // 如果同时指定了所有worker类型，检查总数是否合理
-        if let (Some(read_w), Some(tokenize_w), Some(write_w)) = (a.read_workers, a.tokenize_workers, a.write_workers) {
-            let total = read_w + tokenize_w + write_w;
-            if total > workers * 2 {  // 允许一定程度的过度订阅，但不能太过分
-                bail!("手动指定的worker总数({})过多，建议不超过总worker数的2倍({})", total, workers * 2);
-            }
+        // 智能worker分配：如果用户没有手动指定，使用基于测试数据的最优配置
+        let (optimal_read, optimal_tokenize, optimal_write) = Self::calculate_optimal_workers(workers);
+        
+        let read_workers = a.read_workers.unwrap_or(optimal_read);
+        let tokenize_workers = a.tokenize_workers.unwrap_or(optimal_tokenize);
+        let write_workers = a.write_workers.unwrap_or(optimal_write);
+        
+        // 验证最终配置的合理性
+        let total_specified = read_workers + tokenize_workers + write_workers;
+        if total_specified > workers * 2 {
+            bail!("Worker总数({})过多，建议不超过总worker数的2倍({})", total_specified, workers * 2);
+        }
+        
+        // 输出配置信息
+        if a.read_workers.is_none() || a.tokenize_workers.is_none() || a.write_workers.is_none() {
+            tracing::info!(
+                "使用智能worker分配 (基于{}核CPU): read={}, tokenize={}, write={}, total={}",
+                workers, read_workers, tokenize_workers, write_workers, total_specified
+            );
+        } else {
+            tracing::info!(
+                "使用手动worker分配: read={}, tokenize={}, write={}, total={}",
+                read_workers, tokenize_workers, write_workers, total_specified
+            );
         }
         Ok(Self {
             input_dir: a.input_dir.clone(),
@@ -62,9 +105,9 @@ impl Config {
             tokenizer: a.tokenizer.clone(),
             batch_size: a.batch_size,
             workers,
-            read_workers: a.read_workers,
-            tokenize_workers: a.tokenize_workers,
-            write_workers: a.write_workers,
+            read_workers: Some(read_workers),
+            tokenize_workers: Some(tokenize_workers),
+            write_workers: Some(write_workers),
             queue_cap: a.queue_cap,
             dtype: a.dtype,
             keep_order: a.keep_order,
