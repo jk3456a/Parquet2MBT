@@ -1,16 +1,15 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use crossbeam_channel::{bounded, unbounded};
+use crossbeam_channel::{bounded};
 use rayon::prelude::*;
 
 use crate::config::Config;
 use crate::reader::open_parquet_batches_with_names;
 use crate::preprocessor::extract_text_columns;
 use crate::tokenizer::Tok;
-use crate::writer::BinWriter;
 use crate::index::{write_index, IdxDType};
 use crate::metrics::{Metrics, spawn_stdout_reporter};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::time::Duration;
 use std::fs;
 use crate::cli::DType;
@@ -31,24 +30,55 @@ struct TokenizedBatch {
 }
 
 pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
-    // 智能worker分配：根据文件数量和总worker数动态调整
     let cpu_cores = num_cpus::get();
     let file_count = files.len();
     
-    // 阶段1：读取worker数不能超过文件数量
-    let read_workers = if file_count == 1 {
-        // 单文件：只需要1个读取worker，其他worker用于tokenization
-        1
+    // Worker分配：支持手动指定或自动分配
+    let write_workers = cfg.write_workers.unwrap_or(1);
+    
+    let (read_workers, tokenize_workers) = if cfg.no_tokenize {
+        // 无分词模式: 尊重手动指定的read_workers，tokenize_workers 为 0
+        let read_w = if let Some(manual_read) = cfg.read_workers {
+            manual_read.min(file_count).max(1)
+        } else {
+            cfg.workers.saturating_sub(write_workers).max(1).min(file_count)
+        };
+        (read_w, 0)
     } else {
-        // 多文件：读取worker数 = min(文件数, 20% of total workers)
-        (cfg.workers * 20 / 100).max(1).min(file_count)
+        // 正常模式
+        let read_w = if let Some(manual_read) = cfg.read_workers {
+            manual_read.min(file_count).max(1)
+        } else {
+            if file_count == 1 { 1 } else { (cfg.workers * 20 / 100).max(1).min(file_count) }
+        };
+        
+        let tokenize_w = if let Some(manual_tokenize) = cfg.tokenize_workers {
+            manual_tokenize.max(1)
+        } else {
+            cfg.workers.saturating_sub(read_w).saturating_sub(write_workers).max(1)
+        };
+        (read_w, tokenize_w)
     };
     
-    // 阶段2：CPU密集型 - tokenization（分配大部分worker）
-    let tokenize_workers = cfg.workers - read_workers - 1;  // 剩余大部分给tokenization
-    
-    // 阶段3：写入只需要1个worker（流式写入）
-    let write_workers = 1;
+    // 验证worker分配的合理性
+    let total_specified = read_workers + tokenize_workers + write_workers;
+    if cfg.read_workers.is_some() || cfg.tokenize_workers.is_some() || cfg.write_workers.is_some() {
+        if total_specified > cfg.workers {
+            tracing::warn!(
+                "手动指定的worker总数({})超过了总worker数({}), 这可能导致过度订阅",
+                total_specified, cfg.workers
+            );
+        }
+        tracing::info!(
+            "使用手动worker分配: read={}, tokenize={}, write={}, total={}",
+            read_workers, tokenize_workers, write_workers, total_specified
+        );
+    } else {
+        tracing::info!(
+            "使用自动worker分配: read={}, tokenize={}, write={}, total={}",
+            read_workers, tokenize_workers, write_workers, total_specified
+        );
+    }
     
     // 根据CPU与外部tokenize worker数智能配置tokenizers内部并行，避免过度订阅
     // 单文件或外部tokenize worker不多时，开启内部并行；
@@ -110,116 +140,192 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     let write_total_docs = total_docs.clone();
     let write_output_prefix = cfg.output_prefix.clone();
     let write_no_write = cfg.no_write;
-    let write_handle = std::thread::spawn(move || -> Result<Vec<u32>> {
-        let mut all_doc_lens = Vec::new();
-        let mut bin_writer = if !write_no_write {
-            let bin_path = format!("{}.bin", write_output_prefix);
-            Some(std::io::BufWriter::new(
-                std::fs::OpenOptions::new()
+    
+    // 创建Write Worker线程池（按目标大小进行分片写入）
+    let write_handles: Vec<_> = (0..write_workers).map(|worker_id| {
+        let tokenize_rx = tokenize_rx.clone();
+        let write_total_docs = write_total_docs.clone();
+        let write_output_prefix = write_output_prefix.clone();
+        let max_shard_bytes: u64 = (cfg.target_shard_size_mb as u64).saturating_mul(1_048_576);
+        
+        std::thread::spawn(move || -> Result<Vec<u32>> {
+            use std::io::Write;
+
+            let mut all_doc_lens = Vec::new();
+            if write_no_write {
+                // 启用 no-write：消费数据但不落盘
+                tracing::debug!("Write worker {} started (no-write)", worker_id);
+                while let Ok(batch) = tokenize_rx.recv() {
+                    write_total_docs.fetch_add(batch.doc_lens.len(), Ordering::Relaxed);
+                }
+                tracing::debug!("Write worker {} finished (no-write)", worker_id);
+                return Ok(all_doc_lens);
+            }
+
+            // 分片状态
+            let mut shard_seq: u32 = 0;
+            let mut bytes_in_shard: u64 = 0;
+            let mut shard_doc_lens: Vec<u32> = Vec::new();
+            let mut bin_writer_opt: Option<std::io::BufWriter<std::fs::File>> = None;
+
+            // 打开新分片
+            let mut open_new_shard_fn = |seq: u32| -> Result<std::io::BufWriter<std::fs::File>> {
+                let bin_path = format!("{}.shard_{:02}_{:05}.bin", write_output_prefix, worker_id, seq);
+                let f = std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(true)
                     .write(true)
                     .open(&bin_path)
-                    .with_context(|| format!("create bin file: {}", bin_path))?
-            ))
-        } else {
-            None
-        };
-        
-        while let Ok(batch) = tokenize_rx.recv() {
-            write_total_docs.fetch_add(batch.doc_lens.len(), Ordering::Relaxed);
+                    .with_context(|| format!("create bin file: {}", bin_path))?;
+                Ok(std::io::BufWriter::new(f))
+            };
             
-            // 流式写入：立即写入token数据到磁盘，避免内存累积
-            if let Some(ref mut writer) = bin_writer {
-                use std::io::Write;
-                for tokens in &batch.token_data {
-                    // 根据dtype写入token数据
+            tracing::debug!("Write worker {} started", worker_id);
+            
+            while let Ok(batch) = tokenize_rx.recv() {
+                write_total_docs.fetch_add(batch.doc_lens.len(), Ordering::Relaxed);
+                
+                // 如未打开分片，则打开第一个分片
+                if bin_writer_opt.is_none() { shard_seq += 1; bin_writer_opt = Some(open_new_shard_fn(shard_seq)?); bytes_in_shard = 0; }
+
+                let item_size = match dtype { IdxDType::U16 => 2usize, IdxDType::I32 => 4usize } as u64;
+                // 注意：writer_ref 在每次使用前重新借用，避免跨作用域借用
+
+                // 逐文档写入，必要时切分到新分片
+                for (doc_len, tokens) in batch.doc_lens.iter().copied().zip(batch.token_data.iter()) {
+                    let doc_bytes = (doc_len as u64).saturating_mul(item_size);
+                    // 若当前分片非空且超阈值，则结束当前分片，开启新分片
+                    if max_shard_bytes > 0 && !shard_doc_lens.is_empty() && bytes_in_shard.saturating_add(doc_bytes) > max_shard_bytes {
+                        // flush 当前分片并写 idx
+                        if let Some(mut w) = bin_writer_opt.take() {
+                            w.flush().with_context(|| format!("flush bin file shard {}", shard_seq))?;
+                        }
+                        if !shard_doc_lens.is_empty() {
+                            let idx_path = format!("{}.shard_{:02}_{:05}.idx", write_output_prefix, worker_id, shard_seq);
+                            let seq_count = shard_doc_lens.len();
+                            let mut doc_indices: Vec<u64> = Vec::with_capacity(seq_count + 1);
+                            for i in 0..=seq_count { doc_indices.push(i as u64); }
+                            write_index(&idx_path, &shard_doc_lens, &doc_indices, dtype, None)?;
+                        }
+                        tracing::info!(write_worker = worker_id, shard_seq = shard_seq, bytes = bytes_in_shard, docs = shard_doc_lens.len(), "shard finalized");
+                        shard_doc_lens.clear();
+                        shard_seq += 1;
+                        bin_writer_opt = Some(open_new_shard_fn(shard_seq)?);
+                        bytes_in_shard = 0;
+                    }
+
+                    // 写当前文档tokens
+                    let writer_ref = bin_writer_opt.as_mut().unwrap();
                     match dtype {
                         IdxDType::U16 => {
                             for &token in tokens {
-                                if token > u16::MAX as u32 {
-                                    return Err(anyhow::anyhow!("token id {} exceeds u16", token));
-                                }
-                                writer.write_all(&(token as u16).to_le_bytes())?;
+                                if token > u16::MAX as u32 { return Err(anyhow::anyhow!("token id {} exceeds u16", token)); }
+                                writer_ref.write_all(&(token as u16).to_le_bytes())?;
                             }
                         }
                         IdxDType::I32 => {
                             for &token in tokens {
-                                if token > i32::MAX as u32 {
-                                    return Err(anyhow::anyhow!("token id {} exceeds i32", token));
-                                }
-                                writer.write_all(&(token as i32).to_le_bytes())?;
+                                if token > i32::MAX as u32 { return Err(anyhow::anyhow!("token id {} exceeds i32", token)); }
+                                writer_ref.write_all(&(token as i32).to_le_bytes())?;
                             }
                         }
                     }
+                    shard_doc_lens.push(doc_len);
+                    all_doc_lens.push(doc_len);
+                    bytes_in_shard = bytes_in_shard.saturating_add(doc_bytes);
                 }
-                // 只有需要写入时才保留doc_lens用于生成索引
-                all_doc_lens.extend(batch.doc_lens);
-            } else {
-                // no-write模式：处理完立即释放，不保存任何数据
-                // batch.doc_lens 和 batch.token_data 在这里自动释放
-                tracing::debug!("Processed batch with {} docs, immediately released", batch.doc_lens.len());
-                // 注意：在no-write模式下，不累积任何数据到all_doc_lens
             }
-        }
-        
-        if let Some(mut writer) = bin_writer {
-            use std::io::Write;
-            writer.flush().with_context(|| "flush bin file")?;
-        }
-        
-        Ok(all_doc_lens)
-    });
-
-    // 阶段2：Tokenization worker池
-    let tokenize_handles: Vec<_> = (0..tokenize_workers).map(|worker_id| {
-        let tok = tok.clone();
-        let metrics = metrics.clone();
-        let read_rx = read_rx.clone();
-        let tokenize_tx = tokenize_tx.clone();
-        let no_write_mode = cfg.no_write;
-        
-        std::thread::spawn(move || -> Result<()> {
-            tracing::debug!("Tokenization worker {} started", worker_id);
             
-            while let Ok(read_batch) = read_rx.recv() {
-                let t2 = std::time::Instant::now();
-                let ids_batch = tok.encode_batch_ids(&read_batch.texts, false)?;
-                metrics.add_tokenize_time(t2.elapsed().as_nanos() as u64);
-                
-                let mut doc_lens = Vec::new();
-                let mut token_data = Vec::new();
-                
-                for ids in ids_batch {
-                    metrics.inc_tokens(ids.len() as u64);
-                    let bytes_written = match dtype { 
-                        IdxDType::U16 => ids.len() as u64 * 2, 
-                        IdxDType::I32 => ids.len() as u64 * 4 
-                    };
-                    metrics.inc_output_bytes(bytes_written);
-                    
-                    doc_lens.push(ids.len() as u32);
-                    token_data.push(ids);
+            // 结束最后一个分片
+            if bin_writer_opt.is_some() {
+                if let Some(mut w) = bin_writer_opt.take() {
+                    w.flush().with_context(|| format!("flush bin file shard {}", shard_seq))?;
                 }
-                
-                if !doc_lens.is_empty() {
-                    if !no_write_mode {
+                if !shard_doc_lens.is_empty() {
+                    let idx_path = format!("{}.shard_{:02}_{:05}.idx", write_output_prefix, worker_id, shard_seq);
+                    let seq_count = shard_doc_lens.len();
+                    let mut doc_indices: Vec<u64> = Vec::with_capacity(seq_count + 1);
+                    for i in 0..=seq_count { doc_indices.push(i as u64); }
+                    write_index(&idx_path, &shard_doc_lens, &doc_indices, dtype, None)?;
+                }
+                tracing::info!(write_worker = worker_id, shard_seq = shard_seq, bytes = bytes_in_shard, docs = shard_doc_lens.len(), "shard finalized");
+                shard_doc_lens.clear();
+            }
+            
+            tracing::debug!("Write worker {} finished", worker_id);
+            Ok(all_doc_lens)
+        })
+    }).collect();
+
+    // 阶段2：Tokenization worker池 (如果启用)
+    let tokenize_handles: Vec<_> = if !cfg.no_tokenize {
+        (0..tokenize_workers).map(|worker_id| {
+            let tok = tok.clone();
+            let metrics = metrics.clone();
+            let read_rx = read_rx.clone();
+            let tokenize_tx = tokenize_tx.clone();
+            let no_write_mode = cfg.no_write;
+
+            std::thread::spawn(move || -> Result<()> {
+                tracing::debug!("Tokenization worker {} started", worker_id);
+
+                while let Ok(read_batch) = read_rx.recv() {
+                    let input_bytes: usize = read_batch.texts.iter().map(|s| s.len()).sum();
+                    metrics.inc_tokenize_input_bytes(input_bytes as u64);
+
+                    let t2 = std::time::Instant::now();
+                    let ids_batch = tok.encode_batch_ids(&read_batch.texts, false)?;
+                    metrics.add_tokenize_time(t2.elapsed().as_nanos() as u64);
+
+                    let mut doc_lens = Vec::new();
+                    let mut token_data = Vec::new();
+
+                    for ids in ids_batch {
+                        metrics.inc_tokens(ids.len() as u64);
+                        let bytes_written = match dtype {
+                            IdxDType::U16 => ids.len() as u64 * 2,
+                            IdxDType::I32 => ids.len() as u64 * 4
+                        };
+                        metrics.inc_output_bytes(bytes_written);
+
+                        doc_lens.push(ids.len() as u32);
+                        token_data.push(ids);
+                    }
+
+                    if !doc_lens.is_empty() {
                         let tokenized_batch = TokenizedBatch {
                             doc_lens,
                             token_data,
                             file_path: read_batch.file_path,
                         };
                         tokenize_tx.send(tokenized_batch).unwrap();
-                    } else {
-                        // no-write 模式：不经写入阶段，立刻释放 token 数据
                     }
                 }
+
+                tracing::debug!("Tokenization worker {} finished", worker_id);
+                Ok(())
+            })
+        }).collect()
+    } else {
+        // no_tokenize 模式: 启动一个直通worker，仅做数据透传
+        let tokenize_tx_clone = tokenize_tx.clone();
+        vec![std::thread::spawn(move || -> Result<()> {
+            tracing::debug!("Passthrough worker started (no-tokenize mode)");
+            while let Ok(read_batch) = read_rx.recv() {
+                // 模拟一个空的tokenize结果
+                let tokenized_batch = TokenizedBatch {
+                    doc_lens: vec![0; read_batch.texts.len()], // 每个文档长度为0
+                    token_data: vec![vec![]; read_batch.texts.len()], // 无token数据
+                    file_path: read_batch.file_path,
+                };
+                if tokenize_tx_clone.send(tokenized_batch).is_err() {
+                    break; // 下游已关闭
+                }
             }
-            
-            tracing::debug!("Tokenization worker {} finished", worker_id);
+            tracing::debug!("Passthrough worker finished");
             Ok(())
-        })
-    }).collect();
+        })]
+    };
 
     // 阶段1：读取和预处理worker池
     let read_handles: Vec<_> = if file_count == 1 {
@@ -277,29 +383,14 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     }
     drop(tokenize_tx); // 关闭tokenize->write通道
     
-    // 等待写入worker完成
-    let all_doc_lens = write_handle.join().unwrap()?;
-
-    // 写入索引文件（.bin文件已在消费者中流式写入）
+    // 等待所有写入worker完成（分片已各自写出 .bin/.idx）
+    let mut total_docs_written: usize = 0;
+    for h in write_handles { total_docs_written += h.join().unwrap()?.len(); }
     if !cfg.no_write {
-        let bin_path = format!("{}.bin", cfg.output_prefix);
-        let idx_path = format!("{}.idx", cfg.output_prefix);
-        
-        let seq_count = all_doc_lens.len();
-        let mut doc_indices: Vec<u64> = Vec::with_capacity(seq_count + 1);
-        for i in 0..=seq_count { 
-            doc_indices.push(i as u64); 
-        }
-        
-        let t4 = std::time::Instant::now();
-        write_index(&idx_path, &all_doc_lens, &doc_indices, dtype, None)?;
-        metrics.add_index_time(t4.elapsed().as_nanos() as u64);
-        
         tracing::info!(
-            total_docs = seq_count,
-            bin_path = bin_path,
-            idx_path = idx_path,
-            "Files written successfully (bin file streamed, idx file generated)"
+            total_docs = total_docs_written,
+            output_prefix = cfg.output_prefix.as_str(),
+            "Sharded files written successfully (.bin/.idx per shard)"
         );
     }
 
@@ -373,7 +464,7 @@ fn read_single_file(
                     // 零拷贝分片：通过 split_off 按块移动所有权，避免 String 克隆
                     let mut curr = texts; // 接管所有权
                     loop {
-                        let mut next = if curr.len() > chunk_rows {
+                        let next = if curr.len() > chunk_rows {
                             curr.split_off(chunk_rows)
                         } else {
                             Vec::new()

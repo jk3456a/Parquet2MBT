@@ -24,6 +24,11 @@ arrow-schema = "53"
 parquet = "53"
 tokenizers = { version = "0.19", default-features = false, features = ["http","onig"] }
 
+# 使用vendored OpenSSL避免系统依赖
+[dependencies.openssl]
+version = "*"
+features = ["vendored"]
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -40,6 +40,18 @@ pub struct Args {
     #[arg(long, value_name = "INT")]
     pub workers: Option<usize>,
 
+    /// 读取阶段worker数量（可选，默认自动分配为总数的20%）
+    #[arg(long, value_name = "INT")]
+    pub read_workers: Option<usize>,
+
+    /// 分词阶段worker数量（可选，默认自动分配为剩余大部分）
+    #[arg(long, value_name = "INT")]
+    pub tokenize_workers: Option<usize>,
+
+    /// 写入阶段worker数量（可选，默认1个）
+    #[arg(long, value_name = "INT")]
+    pub write_workers: Option<usize>,
+
     /// 有界队列容量
     #[arg(long, value_name = "INT", default_value_t = 8)]
     pub queue_cap: usize,
@@ -63,6 +75,14 @@ pub struct Args {
     /// 不写出 .bin/.idx，仅做读/预处理/分词与指标
     #[arg(long, default_value_t = false)]
     pub no_write: bool,
+
+    /// 不执行分词，仅做读/预处理与指标（可与no-write组合测试纯IO）
+    #[arg(long, default_value_t = false)]
+    pub no_tokenize: bool,
+
+    /// 目标分片大小（MB），达到后轮转生成下一个 .bin/.idx 分片
+    #[arg(long, value_name = "MB", default_value_t = 2048)]
+    pub target_shard_size_mb: usize,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]

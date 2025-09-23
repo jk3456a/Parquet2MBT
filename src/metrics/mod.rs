@@ -18,6 +18,7 @@ pub struct Metrics {
     pub tokenize_ns_total: AtomicU64,
     pub write_ns_total: AtomicU64,
     pub index_ns_total: AtomicU64,
+    pub tokenize_input_bytes_total: AtomicU64,
 }
 
 impl Metrics {
@@ -36,6 +37,7 @@ impl Metrics {
             tokenize_ns_total: AtomicU64::new(0),
             write_ns_total: AtomicU64::new(0),
             index_ns_total: AtomicU64::new(0),
+            tokenize_input_bytes_total: AtomicU64::new(0),
         }
     }
 
@@ -47,6 +49,7 @@ impl Metrics {
 
     pub fn inc_input_bytes(&self, v: u64) { self.input_bytes_total.fetch_add(v, Ordering::Relaxed); }
     pub fn inc_output_bytes(&self, v: u64) { self.output_bytes_total.fetch_add(v, Ordering::Relaxed); }
+    pub fn inc_tokenize_input_bytes(&self, v: u64) { self.tokenize_input_bytes_total.fetch_add(v, Ordering::Relaxed); }
     pub fn inc_records(&self, v: u64) { self.records_total.fetch_add(v, Ordering::Relaxed); }
     pub fn inc_tokens(&self, v: u64) { self.tokens_total.fetch_add(v, Ordering::Relaxed); }
     pub fn inc_files(&self, v: u64) { self.files_total.fetch_add(v, Ordering::Relaxed); }
@@ -67,6 +70,7 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
         let mut prev_output: u64 = 0;
         let mut prev_tokens: u64 = 0;
         let mut prev_records: u64 = 0;
+        let mut prev_tokenize_input: u64 = 0;
         loop {
             crossbeam_channel::select! {
                 recv(shutdown_rx) -> _ => { break; }
@@ -83,21 +87,25 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
                     let tokenize_ns = metrics.tokenize_ns_total.load(Ordering::Relaxed);
                     let write_ns = metrics.write_ns_total.load(Ordering::Relaxed);
                     let index_ns = metrics.index_ns_total.load(Ordering::Relaxed);
+                    let tokenize_input_bytes = metrics.tokenize_input_bytes_total.load(Ordering::Relaxed);
 
                     let delta_input = input.saturating_sub(prev_input);
                     let delta_output = output.saturating_sub(prev_output);
                     let delta_tokens = tokens.saturating_sub(prev_tokens);
                     let delta_records = records.saturating_sub(prev_records);
+                    let delta_tokenize_input = tokenize_input_bytes.saturating_sub(prev_tokenize_input);
                     prev_input = input;
                     prev_output = output;
                     prev_tokens = tokens;
                     prev_records = records;
+                    prev_tokenize_input = tokenize_input_bytes;
 
                     let secs = interval.as_secs().max(1);
                     let in_mbps = (delta_input as f64) / 1048576.0 / (secs as f64);
                     let out_mbps = (delta_output as f64) / 1048576.0 / (secs as f64);
                     let tps = (delta_tokens as f64) / (secs as f64);
                     let rps = (delta_records as f64) / (secs as f64);
+                    let tokenize_input_mbps = (delta_tokenize_input as f64) / 1048576.0 / (secs as f64);
 
                     // 计算基于墙钟时间的实际吞吐量
                     let uptime_secs = metrics.uptime_secs();
@@ -105,6 +113,7 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
                     let overall_records_per_sec = if uptime_secs > 0 { records as f64 / uptime_secs as f64 } else { 0.0 };
                     let overall_read_mbps = if uptime_secs > 0 { (input as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
                     let overall_convert_mbps = if uptime_secs > 0 { (output as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
+                    let overall_tokenize_input_mbps = if uptime_secs > 0 { (tokenize_input_bytes as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
 
                     tracing::info!(
                         component = "metrics",
@@ -121,11 +130,13 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
                         overall_records_per_sec = format!("{:.0}", overall_records_per_sec).as_str(),
                         overall_read_mb_per_sec = format!("{:.2}", overall_read_mbps).as_str(),
                         overall_convert_mb_per_sec = format!("{:.2}", overall_convert_mbps).as_str(),
+                        overall_tokenize_input_mb_per_sec = format!("{:.2}", overall_tokenize_input_mbps).as_str(),
                         // 间隔内的瞬时吞吐量
                         interval_tokens_per_sec = format!("{:.0}", tps).as_str(),
                         interval_records_per_sec = format!("{:.0}", rps).as_str(),
                         interval_read_mb_per_sec = format!("{:.2}", in_mbps).as_str(),
                         interval_convert_mb_per_sec = format!("{:.2}", out_mbps).as_str(),
+                        interval_tokenize_input_mb_per_sec = format!("{:.2}", tokenize_input_mbps).as_str(),
                         "metrics snapshot"
                     );
                 }
