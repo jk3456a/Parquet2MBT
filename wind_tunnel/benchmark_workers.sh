@@ -4,39 +4,89 @@
 set -euo pipefail
 
 # 默认配置（可通过环境变量或命令行覆盖）
-INPUT_DIR="${INPUT_DIR:-/cache/lizhen/zh__CCI4.0-M2-Base-v1-newest_zh_cc-high-loss0__2025091500}"
+INPUT_DIR="${INPUT_DIR:-/home/lizhen/dataset/zh__CCI4.0-M2-Base-v1-newest_zh_cc-high-loss0__2025091500}"
 PATTERN="${PATTERN:-*.parquet}"
-TOKENIZER="${TOKENIZER:-/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/testdata/tokenizer/tokenizer.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-/cache/lizhen/repos/DataPlat/Sstable/Parquet2MBT/testdata/benchmark}"
-BINARY="${BINARY:-./target/release/parquet2mbt}"
+TOKENIZER="${TOKENIZER:-../testdata/tokenizer/tokenizer.json}"
+OUTPUT_DIR="${OUTPUT_DIR:-../testdata/benchmark/worker_and_batchsize}"
+BINARY="${BINARY:-../target/release/parquet2mbt}"
 NO_WRITE="${NO_WRITE:-true}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-180}"
 REPEAT="${REPEAT:-1}"
 
 # 扫描维度
-WORKER_COUNTS=(${WORKER_COUNTS:-16 32 48 64 80 96})
+WORKER_COUNTS=(${WORKER_COUNTS:-16 32 48 64 80 96 120 128})
 BATCH_SIZES=(${BATCH_SIZES:-8192 16384 32768 65536})
+
+# 增量测试支持：检查已完成的测试
+SKIP_EXISTING="${SKIP_EXISTING:-true}"
 
 mkdir -p "$OUTPUT_DIR"
 TS=$(date +%Y%m%d_%H%M%S)
-RESULTS_CSV="$OUTPUT_DIR/windtunnel_w_bs_${TS}.csv"
-RESULTS_LOG="$OUTPUT_DIR/windtunnel_w_bs_${TS}.log"
 
-# CSV 表头（仅使用周期 metrics，不依赖 summary）
-echo "workers,batch_size,uptime_secs,overall_tokens_per_sec,overall_records_per_sec,overall_read_mb_per_sec,overall_convert_mb_per_sec,interval_tokens_per_sec,interval_records_per_sec,interval_read_mb_per_sec,interval_convert_mb_per_sec,tokens_total,records_total,read_workers,tokenize_workers,write_workers" > "$RESULTS_CSV"
+# 增量测试：检查是否存在现有结果文件
+EXISTING_CSV=""
+if [ "$SKIP_EXISTING" = "true" ]; then
+  # 查找最新的结果文件
+  EXISTING_CSV=$(find "$OUTPUT_DIR" -name "windtunnel_w_bs_*.csv" -type f | sort | tail -1)
+  if [ -n "$EXISTING_CSV" ] && [ -f "$EXISTING_CSV" ]; then
+    echo "发现现有结果文件: $EXISTING_CSV"
+    echo "将跳过已测试的参数组合，进行增量测试"
+    RESULTS_CSV="$EXISTING_CSV"
+    RESULTS_LOG="${EXISTING_CSV%.csv}.log"
+  else
+    RESULTS_CSV="$OUTPUT_DIR/windtunnel_w_bs_${TS}.csv"
+    RESULTS_LOG="$OUTPUT_DIR/windtunnel_w_bs_${TS}.log"
+    # CSV 表头（仅使用周期 metrics，不依赖 summary）
+    echo "workers,batch_size,uptime_secs,overall_tokens_per_sec,overall_records_per_sec,overall_read_mb_per_sec,overall_convert_mb_per_sec,interval_tokens_per_sec,interval_records_per_sec,interval_read_mb_per_sec,interval_convert_mb_per_sec,tokens_total,records_total,read_workers,tokenize_workers,write_workers" > "$RESULTS_CSV"
+  fi
+else
+  RESULTS_CSV="$OUTPUT_DIR/windtunnel_w_bs_${TS}.csv"
+  RESULTS_LOG="$OUTPUT_DIR/windtunnel_w_bs_${TS}.log"
+  # CSV 表头（仅使用周期 metrics，不依赖 summary）
+  echo "workers,batch_size,uptime_secs,overall_tokens_per_sec,overall_records_per_sec,overall_read_mb_per_sec,overall_convert_mb_per_sec,interval_tokens_per_sec,interval_records_per_sec,interval_read_mb_per_sec,interval_convert_mb_per_sec,tokens_total,records_total,read_workers,tokenize_workers,write_workers" > "$RESULTS_CSV"
+fi
 
-echo "=== 风洞实验：workers x batch_size ===" | tee "$RESULTS_LOG"
-echo "开始时间: $(date)" | tee -a "$RESULTS_LOG"
-echo "INPUT_DIR=$INPUT_DIR" | tee -a "$RESULTS_LOG"
-echo "TOKENIZER=$TOKENIZER" | tee -a "$RESULTS_LOG"
-echo "NO_WRITE=$NO_WRITE TIMEOUT_SEC=$TIMEOUT_SEC REPEAT=$REPEAT" | tee -a "$RESULTS_LOG"
-echo "WORKERS: ${WORKER_COUNTS[*]}" | tee -a "$RESULTS_LOG"
-echo "BATCH_SIZES: ${BATCH_SIZES[*]}" | tee -a "$RESULTS_LOG"
-echo "" | tee -a "$RESULTS_LOG"
+
+# 日志文件头部信息（仅在新文件时写入）
+if [ "$SKIP_EXISTING" = "true" ] && [ -f "$RESULTS_LOG" ]; then
+  echo "" | tee -a "$RESULTS_LOG"
+  echo "=== 增量测试继续 ===" | tee -a "$RESULTS_LOG"
+  echo "继续时间: $(date)" | tee -a "$RESULTS_LOG"
+  echo "WORKERS: ${WORKER_COUNTS[*]}" | tee -a "$RESULTS_LOG"
+  echo "BATCH_SIZES: ${BATCH_SIZES[*]}" | tee -a "$RESULTS_LOG"
+  echo "" | tee -a "$RESULTS_LOG"
+else
+  echo "=== 风洞实验：workers x batch_size ===" | tee "$RESULTS_LOG"
+  echo "开始时间: $(date)" | tee -a "$RESULTS_LOG"
+  echo "INPUT_DIR=$INPUT_DIR" | tee -a "$RESULTS_LOG"
+  echo "TOKENIZER=$TOKENIZER" | tee -a "$RESULTS_LOG"
+  echo "NO_WRITE=$NO_WRITE TIMEOUT_SEC=$TIMEOUT_SEC REPEAT=$REPEAT" | tee -a "$RESULTS_LOG"
+  echo "WORKERS: ${WORKER_COUNTS[*]}" | tee -a "$RESULTS_LOG"
+  echo "BATCH_SIZES: ${BATCH_SIZES[*]}" | tee -a "$RESULTS_LOG"
+  echo "" | tee -a "$RESULTS_LOG"
+fi
+
+# 函数：检查参数组合是否已测试
+is_already_tested() {
+  local workers=$1
+  local batch_size=$2
+  if [ -f "$RESULTS_CSV" ] && [ "$SKIP_EXISTING" = "true" ]; then
+    # 检查CSV文件中是否已存在该参数组合（排除ERROR行）
+    grep -q "^$workers,$batch_size,[0-9]" "$RESULTS_CSV" 2>/dev/null
+  else
+    return 1  # 不跳过
+  fi
+}
 
 for bs in "${BATCH_SIZES[@]}"; do
   for workers in "${WORKER_COUNTS[@]}"; do
     for r in $(seq 1 "$REPEAT"); do
+      # 检查是否已测试过该参数组合
+      if is_already_tested "$workers" "$bs"; then
+        echo "=== 跳过已测试 batch_size=$bs workers=$workers (run#$r) ===" | tee -a "$RESULTS_LOG"
+        continue
+      fi
+      
       echo "=== 测试 batch_size=$bs workers=$workers (run#$r) ===" | tee -a "$RESULTS_LOG"
       output_prefix="$OUTPUT_DIR/wt_bs${bs}_w${workers}_r${r}_$TS"
       start_time=$(date +%s)
@@ -153,10 +203,10 @@ if not os.path.exists(csv_file):
 
 # 读取数据
 df = pd.read_csv(csv_file)
-df = df[df['elapsed_secs'] != 'ERROR']  # 过滤错误行
-df = df.astype({'workers': int, 'batch_size': int, 'elapsed_secs': float,
+df = df[df['uptime_secs'] != 'ERROR']  # 过滤错误行
+df = df.astype({'workers': int, 'batch_size': int, 'uptime_secs': float,
                 'overall_tokens_per_sec': float, 'overall_records_per_sec': float,
-                'read_avg_mb_per_sec': float, 'convert_avg_mb_per_sec': float})
+                'overall_read_mb_per_sec': float, 'overall_convert_mb_per_sec': float})
 
 # 创建图表
 fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10))
@@ -181,19 +231,19 @@ ax2.legend()
 
 # 3. Workers vs Convert Speed
 for bs, g in df.groupby('batch_size'):
-    ax3.plot(g['workers'], g['convert_avg_mb_per_sec'], 'o-', label=f'bs={bs}')
+    ax3.plot(g['workers'], g['overall_convert_mb_per_sec'], 'o-', label=f'bs={bs}')
 ax3.set_xlabel('Workers')
 ax3.set_ylabel('Convert Speed (MB/s)')
 ax3.set_title('Workers vs Convert Speed')
 ax3.grid(True)
 ax3.legend()
 
-# 4. Workers vs Elapsed Time
+# 4. Workers vs Uptime
 for bs, g in df.groupby('batch_size'):
-    ax4.plot(g['workers'], g['elapsed_secs'], 'o-', label=f'bs={bs}')
+    ax4.plot(g['workers'], g['uptime_secs'], 'o-', label=f'bs={bs}')
 ax4.set_xlabel('Workers')
-ax4.set_ylabel('Elapsed Time (s)')
-ax4.set_title('Workers vs Elapsed Time')
+ax4.set_ylabel('Uptime (s)')
+ax4.set_title('Workers vs Uptime')
 ax4.grid(True)
 ax4.legend()
 
