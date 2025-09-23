@@ -32,7 +32,7 @@ impl Config {
         if a.output_prefix.is_empty() { bail!("--output-prefix 不能为空"); }
         if a.input_dir.is_empty() { bail!("--input-dir 不能为空"); }
         if a.tokenizer.is_empty() { bail!("--tokenizer 不能为空"); }
-        let workers = a.workers.unwrap_or_else(|| std::cmp::max(1, num_cpus::get().saturating_sub(2)));
+        let workers = a.workers.unwrap_or_else(|| num_cpus::get());
         
         // 验证worker参数的合理性
         if let Some(read_w) = a.read_workers {

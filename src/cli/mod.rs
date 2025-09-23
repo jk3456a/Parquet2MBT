@@ -33,22 +33,22 @@ pub struct Args {
     pub tokenizer: String,
 
     /// 批大小（一次 encode_batch 的条数）
-    #[arg(long, value_name = "INT", default_value_t = 32768)]
+    #[arg(long, value_name = "INT", default_value_t = 8192)]
     pub batch_size: usize,
 
-    /// 工作线程数
+    /// 总工作线程数（默认：CPU核数）
     #[arg(long, value_name = "INT")]
     pub workers: Option<usize>,
 
-    /// 读取阶段worker数量（可选，默认自动分配为总数的20%）
+    /// 读取阶段worker数量（可选，默认4个）
     #[arg(long, value_name = "INT")]
     pub read_workers: Option<usize>,
 
-    /// 分词阶段worker数量（可选，默认自动分配为剩余大部分）
+    /// 分词阶段worker数量（可选，默认nproc-6）
     #[arg(long, value_name = "INT")]
     pub tokenize_workers: Option<usize>,
 
-    /// 写入阶段worker数量（可选，默认1个）
+    /// 写入阶段worker数量（可选，默认2个）
     #[arg(long, value_name = "INT")]
     pub write_workers: Option<usize>,
 

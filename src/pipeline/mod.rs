@@ -34,7 +34,8 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     let file_count = files.len();
     
     // Worker分配：支持手动指定或自动分配
-    let write_workers = cfg.write_workers.unwrap_or(1);
+    // 默认值：read=4, write=2, tokenize=nproc-6
+    let write_workers = cfg.write_workers.unwrap_or(2);
     
     let (read_workers, tokenize_workers) = if cfg.no_tokenize {
         // 无分词模式: 尊重手动指定的read_workers，tokenize_workers 为 0
@@ -49,13 +50,14 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
         let read_w = if let Some(manual_read) = cfg.read_workers {
             manual_read.min(file_count).max(1)
         } else {
-            if file_count == 1 { 1 } else { (cfg.workers * 20 / 100).max(1).min(file_count) }
+            4.min(file_count)  // 默认4个read workers
         };
         
         let tokenize_w = if let Some(manual_tokenize) = cfg.tokenize_workers {
             manual_tokenize.max(1)
         } else {
-            cfg.workers.saturating_sub(read_w).saturating_sub(write_workers).max(1)
+            // 默认 nproc - 6 (read=4 + write=2)
+            cfg.workers.saturating_sub(6).max(1)
         };
         (read_w, tokenize_w)
     };

@@ -32,11 +32,15 @@ cargo build --release
   --pattern "*.parquet" \
   --text-cols content,title \
   --tokenizer /path/to/tokenizer.json \
-  --output-prefix /data/out/corpus \
-  --batch-size 32768 \
-  --workers $(nproc) \
-  --dtype auto
+  --output-prefix /data/out/corpus
 ```
+
+**注意**: 新版本已优化默认配置，无需手动指定参数，系统会自动使用最佳配置：
+- 总线程数：CPU核数
+- 读取线程：4个
+- 分词线程：CPU核数-6
+- 写入线程：2个
+- 批处理大小：8192
 
 ## 主要参数
 
@@ -47,20 +51,43 @@ cargo build --release
 - `--output-prefix <PATH>`: 输出文件前缀（生成`<prefix>.bin`和`<prefix>.idx`）
 
 ### 可选参数
+
+#### 基础配置
 - `--pattern <GLOB>`: 文件匹配模式（默认：`*.parquet`）
-- `--batch-size <INT>`: 批处理大小（默认：32768）
-- `--workers <INT>`: 分词工作线程数（默认：CPU核数-2）
+- `--batch-size <INT>`: 批处理大小（默认：8192）
 - `--dtype <TYPE>`: 输出数据类型（`auto|u16|u32`，默认：`auto`）
 - `--doc-boundary <TYPE>`: 文档边界策略（`row|file`，默认：`row`）
 - `--concat-sep <STR>`: 多列拼接分隔符（默认：`\n`）
 - `--metrics-interval <SEC>`: 指标输出间隔秒数（默认：5）
 - `--resume`: 启用断点续传，跳过已完成的文件
+- `--target-shard-size-mb <MB>`: 分片文件大小限制（默认：2048MB）
+
+#### 并行处理配置
+- `--workers <INT>`: 总工作线程数（默认：CPU核数）
+- `--read-workers <INT>`: 读取工作线程数（默认：4）
+- `--tokenize-workers <INT>`: 分词工作线程数（默认：CPU核数-6）
+- `--write-workers <INT>`: 写入工作线程数（默认：2）
+- `--queue-cap <INT>`: 内部队列容量（默认：8）
+
+#### 高级功能
+- `--no-write`: 仅测试模式，不写入文件（用于性能测试）
+- `--no-tokenize`: 跳过分词，仅做读取和预处理（用于I/O测试）
+- `--use-rayon-tokenize`: 启用Rayon在tokenize阶段内部并行化（实验性功能）
+
 
 ## 输出格式
 
+### 标准输出
 工具生成两个文件：
 - `<prefix>.bin`: 包含所有token ID的二进制文件
 - `<prefix>.idx`: 文档边界索引文件，兼容Megatron-LM格式
+
+### 分片输出（多Write Worker）
+当使用多个Write Worker时，生成分片文件：
+- `<prefix>.shard_00_00001.bin`, `<prefix>.shard_01_00001.bin`, ... : 各Worker的分片数据文件
+- `<prefix>.shard_00_00001.idx`, `<prefix>.shard_01_00001.idx`, ... : 对应的索引文件
+
+分片文件命名规则：`shard_{worker_id}_{sequence}.{bin|idx}`
 
 ## 性能监控
 
@@ -73,7 +100,7 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 ## 环境变量
 
 - `RUST_LOG`: 控制日志级别（`debug|info|warn|error`）
-- `RAYON_NUM_THREADS`: 控制内部并行线程数
+- `RAYON_NUM_THREADS`: 控制Rayon内部并行线程数（仅在使用`--use-rayon-tokenize`时生效）
 
 ## 示例
 
@@ -83,20 +110,62 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
   --input-dir ./testdata/data \
   --text-cols content \
   --tokenizer ./testdata/tokenizer/tokenizer.json \
-  --output-prefix ./output/dataset \
-  --batch-size 16384
+  --output-prefix ./output/dataset
 ```
 
 ### 处理多列文本并拼接
 ```bash
 ./target/release/parquet2mbt \
   --input-dir /data/books \
-  --text-cols title,content \
+  --text-cols message,content \
   --concat-sep "\n\n" \
   --tokenizer /models/tokenizer.json \
   --output-prefix /output/books_dataset \
-  --workers 16 \
   --dtype u32
+```
+
+### 高性能生产配置（推荐）
+```bash
+# 使用默认配置（推荐）
+./target/release/parquet2mbt \
+  --input-dir /data/corpus \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /output/corpus \
+  --target-shard-size-mb 2048
+
+# 或手动指定（高级用户）
+./target/release/parquet2mbt \
+  --input-dir /data/corpus \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /output/corpus \
+  --read-workers 4 \
+  --tokenize-workers 122 \
+  --write-workers 2 \
+  --batch-size 8192 \
+  --target-shard-size-mb 2048
+```
+
+### 性能测试配置
+```bash
+# 纯I/O测试
+./target/release/parquet2mbt \
+  --input-dir /data/test \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /tmp/test \
+  --no-tokenize --no-write \
+  --workers 8
+
+# 完整流水线测试
+./target/release/parquet2mbt \
+  --input-dir /data/test \
+  --text-cols content \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /tmp/test \
+  --no-write \
+  --workers 128
 ```
 
 ## 项目结构
