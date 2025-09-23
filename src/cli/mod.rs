@@ -83,6 +83,10 @@ pub struct Args {
     /// 目标分片大小（MB），达到后轮转生成下一个 .bin/.idx 分片
     #[arg(long, value_name = "MB", default_value_t = 2048)]
     pub target_shard_size_mb: usize,
+
+    /// 使用 rayon 并行处理 tokenize 阶段（实验性功能）
+    #[arg(long, default_value_t = false)]
+    pub use_rayon_tokenize: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]

@@ -24,6 +24,7 @@ pub struct Config {
     pub no_write: bool,
     pub no_tokenize: bool,
     pub target_shard_size_mb: usize,
+    pub use_rayon_tokenize: bool,
 }
 
 impl Config {
@@ -72,6 +73,7 @@ impl Config {
             no_write: a.no_write,
             no_tokenize: a.no_tokenize,
             target_shard_size_mb: a.target_shard_size_mb,
+            use_rayon_tokenize: a.use_rayon_tokenize,
         })
     }
 }

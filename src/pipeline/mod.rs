@@ -259,53 +259,106 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
 
     // 阶段2：Tokenization worker池 (如果启用)
     let tokenize_handles: Vec<_> = if !cfg.no_tokenize {
-        (0..tokenize_workers).map(|worker_id| {
-            let tok = tok.clone();
-            let metrics = metrics.clone();
-            let read_rx = read_rx.clone();
-            let tokenize_tx = tokenize_tx.clone();
-            let no_write_mode = cfg.no_write;
+        if cfg.use_rayon_tokenize {
+            // 使用多线程 + tokenizers 内部 rayon 并行化
+            tracing::info!("Using multi-thread workers with tokenizers internal rayon parallelization");
+            
+            (0..tokenize_workers).map(|worker_id| {
+                let tok = tok.clone();
+                let metrics = metrics.clone();
+                let read_rx = read_rx.clone();
+                let tokenize_tx = tokenize_tx.clone();
 
-            std::thread::spawn(move || -> Result<()> {
-                tracing::debug!("Tokenization worker {} started", worker_id);
+                std::thread::spawn(move || -> Result<()> {
+                    tracing::debug!("Rayon tokenization worker {} started", worker_id);
 
-                while let Ok(read_batch) = read_rx.recv() {
-                    let input_bytes: usize = read_batch.texts.iter().map(|s| s.len()).sum();
-                    metrics.inc_tokenize_input_bytes(input_bytes as u64);
+                    while let Ok(read_batch) = read_rx.recv() {
+                        let input_bytes: usize = read_batch.texts.iter().map(|s| s.len()).sum();
+                        metrics.inc_tokenize_input_bytes(input_bytes as u64);
 
-                    let t2 = std::time::Instant::now();
-                    let ids_batch = tok.encode_batch_ids(&read_batch.texts, false)?;
-                    metrics.add_tokenize_time(t2.elapsed().as_nanos() as u64);
+                        let t2 = std::time::Instant::now();
+                        // 启用 tokenizers 内部并行化
+                        let ids_batch = tok.encode_batch_ids(&read_batch.texts, true)?;
+                        metrics.add_tokenize_time(t2.elapsed().as_nanos() as u64);
 
-                    let mut doc_lens = Vec::new();
-                    let mut token_data = Vec::new();
+                        let mut doc_lens = Vec::new();
+                        let mut token_data = Vec::new();
 
-                    for ids in ids_batch {
-                        metrics.inc_tokens(ids.len() as u64);
-                        let bytes_written = match dtype {
-                            IdxDType::U16 => ids.len() as u64 * 2,
-                            IdxDType::I32 => ids.len() as u64 * 4
-                        };
-                        metrics.inc_output_bytes(bytes_written);
+                        for ids in ids_batch {
+                            metrics.inc_tokens(ids.len() as u64);
+                            let bytes_written = match dtype {
+                                IdxDType::U16 => ids.len() as u64 * 2,
+                                IdxDType::I32 => ids.len() as u64 * 4
+                            };
+                            metrics.inc_output_bytes(bytes_written);
 
-                        doc_lens.push(ids.len() as u32);
-                        token_data.push(ids);
+                            doc_lens.push(ids.len() as u32);
+                            token_data.push(ids);
+                        }
+
+                        if !doc_lens.is_empty() {
+                            let tokenized_batch = TokenizedBatch {
+                                doc_lens,
+                                token_data,
+                                file_path: read_batch.file_path,
+                            };
+                            tokenize_tx.send(tokenized_batch).unwrap();
+                        }
                     }
 
-                    if !doc_lens.is_empty() {
-                        let tokenized_batch = TokenizedBatch {
-                            doc_lens,
-                            token_data,
-                            file_path: read_batch.file_path,
-                        };
-                        tokenize_tx.send(tokenized_batch).unwrap();
-                    }
-                }
+                    tracing::debug!("Rayon tokenization worker {} finished", worker_id);
+                    Ok(())
+                })
+            }).collect()
+        } else {
+            // 传统的多线程 worker 池
+            (0..tokenize_workers).map(|worker_id| {
+                let tok = tok.clone();
+                let metrics = metrics.clone();
+                let read_rx = read_rx.clone();
+                let tokenize_tx = tokenize_tx.clone();
 
-                tracing::debug!("Tokenization worker {} finished", worker_id);
-                Ok(())
-            })
-        }).collect()
+                std::thread::spawn(move || -> Result<()> {
+                    tracing::debug!("Tokenization worker {} started", worker_id);
+
+                    while let Ok(read_batch) = read_rx.recv() {
+                        let input_bytes: usize = read_batch.texts.iter().map(|s| s.len()).sum();
+                        metrics.inc_tokenize_input_bytes(input_bytes as u64);
+
+                        let t2 = std::time::Instant::now();
+                        let ids_batch = tok.encode_batch_ids(&read_batch.texts, false)?;
+                        metrics.add_tokenize_time(t2.elapsed().as_nanos() as u64);
+
+                        let mut doc_lens = Vec::new();
+                        let mut token_data = Vec::new();
+
+                        for ids in ids_batch {
+                            metrics.inc_tokens(ids.len() as u64);
+                            let bytes_written = match dtype {
+                                IdxDType::U16 => ids.len() as u64 * 2,
+                                IdxDType::I32 => ids.len() as u64 * 4
+                            };
+                            metrics.inc_output_bytes(bytes_written);
+
+                            doc_lens.push(ids.len() as u32);
+                            token_data.push(ids);
+                        }
+
+                        if !doc_lens.is_empty() {
+                            let tokenized_batch = TokenizedBatch {
+                                doc_lens,
+                                token_data,
+                                file_path: read_batch.file_path,
+                            };
+                            tokenize_tx.send(tokenized_batch).unwrap();
+                        }
+                    }
+
+                    tracing::debug!("Tokenization worker {} finished", worker_id);
+                    Ok(())
+                })
+            }).collect()
+        }
     } else {
         // no_tokenize 模式: 启动一个直通worker，仅做数据透传
         let tokenize_tx_clone = tokenize_tx.clone();
