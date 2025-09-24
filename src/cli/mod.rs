@@ -36,6 +36,10 @@ pub struct Args {
     #[arg(long, value_name = "INT", default_value_t = 8192)]
     pub batch_size: usize,
 
+    /// 分词切片的行数（从读取批中再切分给tokenizer的每次条数）
+    #[arg(long, value_name = "INT", default_value_t = 1024)]
+    pub tokenize_chunk_rows: usize,
+
     /// 总工作线程数（默认：CPU核数）
     #[arg(long, value_name = "INT")]
     pub workers: Option<usize>,

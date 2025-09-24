@@ -174,7 +174,7 @@ impl ReaderPool {
 
                     // 发送到tokenization阶段：将大批拆成更小的tokenize批次，提升并行度
                     if !texts.is_empty() {
-                        let chunk_rows: usize = cfg.batch_size.max(1);
+                        let chunk_rows: usize = cfg.tokenize_chunk_rows.max(1);
                         
                         // 零拷贝分片：通过 split_off 按块移动所有权，避免 String 克隆
                         let mut curr = texts; // 接管所有权
