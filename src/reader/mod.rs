@@ -7,6 +7,9 @@ use std::path::Path;
 use arrow_schema::SchemaRef;
 use arrow_array::RecordBatchReader;
 
+pub mod pool;
+pub use pool::{ReaderPool, ReadBatch};
+
 pub struct BatchStream {
     pub schema: SchemaRef,
     pub reader: ParquetRecordBatchReader,

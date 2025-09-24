@@ -53,7 +53,7 @@ pub struct Args {
     pub write_workers: Option<usize>,
 
     /// 有界队列容量
-    #[arg(long, value_name = "INT", default_value_t = 8)]
+    #[arg(long, value_name = "INT", default_value_t = 32)]
     pub queue_cap: usize,
 
     /// 元素 dtype（auto|u16|i32）
@@ -84,9 +84,6 @@ pub struct Args {
     #[arg(long, value_name = "MB", default_value_t = 2048)]
     pub target_shard_size_mb: usize,
 
-    /// 使用 rayon 并行处理 tokenize 阶段（实验性功能）
-    #[arg(long, default_value_t = false)]
-    pub use_rayon_tokenize: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]

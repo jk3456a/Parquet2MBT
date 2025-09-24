@@ -1,6 +1,9 @@
 use anyhow::Result;
 use tokenizers::{Tokenizer, EncodeInput, Encoding};
 
+pub mod pool;
+pub use pool::{TokenizerPool, TokenizedBatch};
+
 pub struct Tok {
     inner: Tokenizer,
 }
@@ -9,6 +12,12 @@ impl Tok {
     pub fn from_path(path: &str) -> Result<Self> {
         let inner = Tokenizer::from_file(path).map_err(|e| anyhow::anyhow!("load tokenizer: {}: {}", path, e))?;
         Ok(Self { inner })
+    }
+
+    pub fn dummy() -> Self {
+        // 创建一个空的tokenizer用于no_tokenize模式
+        let tokenizer = Tokenizer::new(tokenizers::models::bpe::BPE::default());
+        Self { inner: tokenizer }
     }
 
     pub fn encode_batch_ids(&self, texts: &[String], add_special: bool) -> Result<Vec<Vec<u32>>> {
