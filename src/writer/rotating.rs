@@ -88,7 +88,9 @@ impl ShardWriter {
                                  self.output_prefix, self.worker_id, self.shard_id);
             
             let seq_count = self.doc_lens.len();
-            let doc_indices: Vec<u64> = (0..=seq_count as u64).collect();
+            // 每个文档即一个序列；document_indices 表示文档->序列的映射
+            // 与 Megatron 格式保持一致，这里长度应等于 doc_count（非 seq_count+1）
+            let doc_indices: Vec<u64> = (0..seq_count as u64).collect();
             
             let t_idx = std::time::Instant::now();
             write_index(&idx_path, &self.doc_lens, &doc_indices, dtype, None)
@@ -119,7 +121,8 @@ struct FinalizeTask {
 /// 轮转写入器池
 pub struct RotatingWriterPool {
     active_writers: Vec<Option<ShardWriter>>,
-    standby_queue: Arc<Mutex<VecDeque<ShardWriter>>>,
+    // 延迟创建：仅缓存待用 shard_id，避免预创建文件导致错配/空文件
+    standby_queue: Arc<Mutex<VecDeque<u32>>>,
     finalize_tx: Sender<FinalizeTask>,
     finalize_handles: Vec<JoinHandle<Result<()>>>,
     next_shard_id: AtomicU32,
@@ -129,6 +132,8 @@ pub struct RotatingWriterPool {
     metrics: Arc<Metrics>,
     num_workers: usize,
     standby_pool_size: usize,
+    // 全局 worker 偏移量：用于在多线程独立 pool 场景下避免文件名冲突
+    worker_id_offset: usize,
 }
 
 impl RotatingWriterPool {
@@ -138,27 +143,27 @@ impl RotatingWriterPool {
         max_shard_bytes: u64,
         dtype: IdxDType,
         metrics: Arc<Metrics>,
+        worker_id_offset: usize,
     ) -> Result<Self> {
         let standby_pool_size = num_workers * 2; // 2x standby pool
         let (finalize_tx, finalize_rx) = bounded::<FinalizeTask>(standby_pool_size);
         
-        // 创建初始活跃 writers
+        // 创建初始活跃 writers（使用全局 worker_id 防止冲突）
         let mut active_writers = Vec::with_capacity(num_workers);
         let next_shard_id = AtomicU32::new(1);
         
-        for worker_id in 0..num_workers {
+        for local_worker_id in 0..num_workers {
             let shard_id = next_shard_id.fetch_add(1, Ordering::Relaxed);
-            let writer = ShardWriter::new(output_prefix.clone(), worker_id, shard_id)?;
+            let global_worker_id = worker_id_offset + local_worker_id;
+            let writer = ShardWriter::new(output_prefix.clone(), global_worker_id, shard_id)?;
             active_writers.push(Some(writer));
         }
         
-        // 创建预备 writers 队列
+        // 创建预备 shard_id 队列（延迟到分配时再打开文件）
         let standby_queue = Arc::new(Mutex::new(VecDeque::new()));
         for _ in 0..standby_pool_size {
-            let worker_id = 0; // 预备 writer 的 worker_id 在分配时确定
             let shard_id = next_shard_id.fetch_add(1, Ordering::Relaxed);
-            let writer = ShardWriter::new(output_prefix.clone(), worker_id, shard_id)?;
-            standby_queue.lock().unwrap().push_back(writer);
+            standby_queue.lock().unwrap().push_back(shard_id);
         }
         
         // 启动后台 finalize 线程池
@@ -190,6 +195,7 @@ impl RotatingWriterPool {
             metrics,
             num_workers,
             standby_pool_size,
+            worker_id_offset,
         })
     }
 
@@ -198,6 +204,7 @@ impl RotatingWriterPool {
             return Err(anyhow::anyhow!("invalid worker_id: {}", worker_id));
         }
 
+        let t_write_total = std::time::Instant::now();
         // 检查是否需要轮转
         let should_rotate = if let Some(writer) = self.active_writers[worker_id].as_ref() {
             writer.should_rotate(self.max_shard_bytes)
@@ -213,6 +220,7 @@ impl RotatingWriterPool {
         let writer = self.active_writers[worker_id].as_mut()
             .ok_or_else(|| anyhow::anyhow!("no active writer for worker {}", worker_id))?;
         writer.write_document(tokens, self.dtype)?;
+        self.metrics.add_write_time(t_write_total.elapsed().as_nanos() as u64);
         
         Ok(())
     }
@@ -222,15 +230,14 @@ impl RotatingWriterPool {
         let old_writer = self.active_writers[worker_id].take()
             .ok_or_else(|| anyhow::anyhow!("no writer to rotate for worker {}", worker_id))?;
 
-        // 从预备队列获取新 writer
-        let mut new_writer = {
+        // 从预备队列获取下一个 shard_id 并创建新 writer（按全局 worker_id 命名文件）
+        let shard_id = {
             let mut queue = self.standby_queue.lock().unwrap();
             queue.pop_front()
                 .ok_or_else(|| anyhow::anyhow!("no standby writer available"))?
         };
-
-        // 更新新 writer 的 worker_id
-        new_writer.worker_id = worker_id;
+        let global_worker_id = self.worker_id_offset + worker_id;
+        let new_writer = ShardWriter::new(self.output_prefix.clone(), global_worker_id, shard_id)?;
 
         // 立即替换活跃 writer
         self.active_writers[worker_id] = Some(new_writer);
@@ -245,7 +252,7 @@ impl RotatingWriterPool {
         self.finalize_tx.send(finalize_task)
             .map_err(|_| anyhow::anyhow!("failed to send finalize task"))?;
 
-        // 补充预备队列
+        // 补充预备队列（仅生成新的 shard_id）
         self.replenish_standby_pool()?;
 
         Ok(())
@@ -255,8 +262,7 @@ impl RotatingWriterPool {
         let mut queue = self.standby_queue.lock().unwrap();
         while queue.len() < self.standby_pool_size {
             let shard_id = self.next_shard_id.fetch_add(1, Ordering::Relaxed);
-            let writer = ShardWriter::new(self.output_prefix.clone(), 0, shard_id)?;
-            queue.push_back(writer);
+            queue.push_back(shard_id);
         }
         Ok(())
     }

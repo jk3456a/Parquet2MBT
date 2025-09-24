@@ -127,7 +127,13 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     let tok = if cfg.no_tokenize {
         None
     } else {
-        Some(Arc::new(Tok::from_path(&cfg.tokenizer)?))
+        {
+            let tpath = &cfg.tokenizer;
+            let tk = Tok::from_path(tpath)?;
+            let vs = tk.vocab_size(true);
+            tracing::info!(tokenizer_path = tpath.as_str(), vocab_size = vs, "tokenizer loaded");
+            Some(Arc::new(tk))
+        }
     };
 
     // 选择 dtype（auto 基于词表规模）
@@ -137,7 +143,9 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
         DType::Auto => {
             if let Some(ref tokenizer) = tok {
                 let vs = tokenizer.vocab_size(true);
-                if vs < 65500 { IdxDType::U16 } else { IdxDType::I32 }
+                let inferred = if vs < 65500 { IdxDType::U16 } else { IdxDType::I32 };
+                tracing::info!(vocab_size = vs, inferred_dtype = match inferred { IdxDType::U16 => "u16", IdxDType::I32 => "i32" }, "dtype auto selection");
+                inferred
             } else {
                 IdxDType::U16 // no_tokenize 模式默认使用 U16
             }
@@ -321,6 +329,7 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
                 max_shard_bytes,
                 dtype,
                 metrics.clone(),
+                worker_id, // 作为全局 worker 偏移，保证文件名不冲突
             )?;
             
             tracing::debug!("Write worker {} started with personal rotating writer", worker_id);
@@ -328,7 +337,7 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
             while let Ok(batch) = tokenize_rx.recv() {
                 // 无锁批量写入！
                 for tokens in batch.token_data.iter() {
-                    personal_writer.write_document(0, tokens)?; // 在个人pool中worker_id总是0
+                    personal_writer.write_document(0, tokens)?; // 本地 id=0，但文件名用全局偏移
                 }
                 docs_written += batch.doc_lens.len();
             }
