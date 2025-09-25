@@ -150,8 +150,8 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
 
     // 初始化指标系统
     let metrics = Arc::new(Metrics::new());
-    let (_shutdown_tx, shutdown_rx) = bounded::<()>(1);
-    let _metrics_handle = if cfg.metrics_interval > 0 {
+    let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
+    let metrics_handle = if cfg.metrics_interval > 0 {
         Some(spawn_stdout_reporter(
             metrics.clone(),
             Duration::from_secs(cfg.metrics_interval),
@@ -286,6 +286,10 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
         output_mb = output_bytes / 1_048_576,
         "Final statistics"
     );
+
+    // 停止 metrics reporter 并等待其输出最终 summary
+    if let Some(tx) = Some(shutdown_tx) { let _ = tx.send(()); }
+    if let Some(h) = metrics_handle { let _ = h.join(); }
 
     Ok(())
 }

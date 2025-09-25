@@ -7,7 +7,7 @@ use crossbeam_channel::{Sender, Receiver};
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::reader::open_parquet_batches_with_names;
-use crate::preprocessor::extract_text_columns;
+use crate::preprocessor::{extract_text_columns, process_plain_or_chatml};
 use std::fs;
 
 /// 读取批次数据
@@ -125,31 +125,21 @@ impl ReaderPool {
         }
 
         // 优先按列名进行投影，减少反序列化与 I/O
+        // 仅投影 chatml 与 plain 关键列（messages 优先于 content）。
+        let mut proj_cols = vec!["messages".to_string(), "content".to_string()];
         let t0 = std::time::Instant::now();
-        let stream = open_parquet_batches_with_names(&path, Some(&cfg.text_cols), Some(cfg.batch_size))
+        let stream = open_parquet_batches_with_names(&path, Some(&proj_cols), Some(cfg.batch_size))
             .with_context(|| format!("open batches for {:?}", path))?;
         metrics.add_reader_time(t0.elapsed().as_nanos() as u64);
 
         let schema = &stream.schema;
         
         // 通过列名解析索引；若找不到则回退到所有 Utf8/LargeUtf8 列
-        let mut text_col_indices: Vec<usize> = cfg
-            .text_cols
-            .iter()
-            .filter_map(|name| schema.column_with_name(name).map(|(i, _)| i))
-            .collect();
-            
-        if text_col_indices.is_empty() {
-            for (i, f) in schema.fields().iter().enumerate() {
-                let dt = f.data_type();
-                let is_text = matches!(dt, arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8);
-                if is_text {
-                    text_col_indices.push(i);
-                }
-            }
-        }
-        
-        if text_col_indices.is_empty() {
+        // 解析 content 与 messages 列索引（若存在）。
+        let content_idx = schema.column_with_name("content").map(|(i, _)| i);
+        let messages_idx = schema.column_with_name("messages").map(|(i, _)| i);
+
+        if content_idx.is_none() && messages_idx.is_none() {
             anyhow::bail!("未找到可用的文本列；请通过 --text-cols 指定列名");
         }
 
@@ -167,9 +157,9 @@ impl ReaderPool {
                     metrics.inc_batches(1);
                     metrics.inc_records(batch.num_rows() as u64);
 
-                    // 预处理：提取文本列并拼接
+                    // 预处理：优先使用 chatml(messages) 或 plain(content)
                     let t1 = std::time::Instant::now();
-                    let texts = extract_text_columns(&batch, &text_col_indices, &cfg.concat_sep)?;
+                    let texts = process_plain_or_chatml(&batch, content_idx, messages_idx, &cfg.concat_sep)?;
                     metrics.add_preprocess_time(t1.elapsed().as_nanos() as u64);
 
                     // 发送到tokenization阶段：将大批拆成更小的tokenize批次，提升并行度

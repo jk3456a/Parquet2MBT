@@ -73,7 +73,44 @@ pub fn spawn_stdout_reporter(metrics: Arc<Metrics>, interval: Duration, shutdown
         let mut prev_tokenize_input: u64 = 0;
         loop {
             crossbeam_channel::select! {
-                recv(shutdown_rx) -> _ => { break; }
+                recv(shutdown_rx) -> _ => {
+                    // 在退出前打印一次最终汇总
+                    let input = metrics.input_bytes_total.load(Ordering::Relaxed);
+                    let output = metrics.output_bytes_total.load(Ordering::Relaxed);
+                    let tokens = metrics.tokens_total.load(Ordering::Relaxed);
+                    let records = metrics.records_total.load(Ordering::Relaxed);
+                    let files = metrics.files_total.load(Ordering::Relaxed);
+                    let batches = metrics.batches_total.load(Ordering::Relaxed);
+                    let errors = metrics.errors_total.load(Ordering::Relaxed);
+                    let tokenize_input_bytes = metrics.tokenize_input_bytes_total.load(Ordering::Relaxed);
+
+                    let uptime_secs = metrics.uptime_secs();
+                    let overall_tokens_per_sec = if uptime_secs > 0 { tokens as f64 / uptime_secs as f64 } else { 0.0 };
+                    let overall_records_per_sec = if uptime_secs > 0 { records as f64 / uptime_secs as f64 } else { 0.0 };
+                    let overall_read_mbps = if uptime_secs > 0 { (input as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
+                    let overall_convert_mbps = if uptime_secs > 0 { (output as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
+                    let overall_tokenize_input_mbps = if uptime_secs > 0 { (tokenize_input_bytes as f64) / 1048576.0 / (uptime_secs as f64) } else { 0.0 };
+
+                    tracing::info!(
+                        component = "metrics",
+                        summary = true,
+                        uptime_secs = uptime_secs,
+                        input_bytes_total = input,
+                        output_bytes_total = output,
+                        files_total = files,
+                        batches_total = batches,
+                        records_total = records,
+                        tokens_total = tokens,
+                        errors_total = errors,
+                        overall_tokens_per_sec = format!("{:.0}", overall_tokens_per_sec).as_str(),
+                        overall_records_per_sec = format!("{:.0}", overall_records_per_sec).as_str(),
+                        overall_read_mb_per_sec = format!("{:.2}", overall_read_mbps).as_str(),
+                        overall_convert_mb_per_sec = format!("{:.2}", overall_convert_mbps).as_str(),
+                        overall_tokenize_input_mb_per_sec = format!("{:.2}", overall_tokenize_input_mbps).as_str(),
+                        "metrics summary"
+                    );
+                    break;
+                }
                 recv(ticker) -> _ => {
                     let input = metrics.input_bytes_total.load(Ordering::Relaxed);
                     let output = metrics.output_bytes_total.load(Ordering::Relaxed);

@@ -16,10 +16,6 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub output_prefix: String,
 
-    /// 文本列，逗号分隔
-    #[arg(long, value_name = "COLS", default_value = "text")]
-    pub text_cols: String,
-
     /// 文档边界：row 或 file
     #[arg(long, value_enum, default_value_t = DocBoundary::Row)]
     pub doc_boundary: DocBoundary,

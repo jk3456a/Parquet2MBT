@@ -7,6 +7,7 @@ pub struct Config {
     pub input_dir: String,
     pub pattern: String,
     pub output_prefix: String,
+    // 已弃用：保留字段避免破坏序列化兼容；不再使用 text_cols。
     pub text_cols: Vec<String>,
     pub doc_boundary: DocBoundary,
     pub concat_sep: String,
@@ -28,28 +29,29 @@ pub struct Config {
 }
 
 impl Config {
-    /// 基于测试数据的智能worker分配策略 - 分层配置
+    /// 基于实测数据的智能 worker 分配策略
+    /// 原则：读是瓶颈→相对多给 read；写较轻→固定 2；其余给 tokenize
     fn calculate_optimal_workers(total_workers: usize) -> (usize, usize, usize) {
         let (read_workers, write_workers) = match total_workers {
-            // 0-32核: 1读取 + 1写入
-            0..=32 => (1, 1),
-            // 32-64核: 2读取 + 1写入  
-            33..=64 => (2, 1),
-            // 64-96核: 3读取 + 2写入
-            65..=96 => (3, 2),
-            // 96-128核: 4读取 + 2写入
-            97..=128 => (4, 2),
-            // 128+核: 按2:64:1比例分配
+            // 小机型
+            0..=32 => (2, 1),          // 读2 写1，其余分词
+            33..=64 => (3, 1),         // 读3 写1
+            65..=96 => (4, 2),         // 读4 写2
+            // 128核级别（用户实测最优）
+            97..=160 => (6, 2),        // 读6 写2，其余分词（128核≈6/2/其余）
+            // 超大核数：按比例回退，限制上限避免过分放大
             _ => {
-                // 对于超大核心数，使用固定比例：约3%读取，1.5%写入，95.5%分词
-                let read_w = ((total_workers as f64 * 0.03).round() as usize).max(2).min(8);
-                let write_w = ((total_workers as f64 * 0.015).round() as usize).max(1).min(4);
+                let read_w = ((total_workers as f64 / 21.0).round() as usize).clamp(6, 16);
+                let write_w = ((total_workers as f64 / 64.0).round() as usize).clamp(2, 4);
                 (read_w, write_w)
             }
         };
-        
-        let tokenize_workers = total_workers.saturating_sub(read_workers).saturating_sub(write_workers).max(1);
-        
+
+        let tokenize_workers = total_workers
+            .saturating_sub(read_workers)
+            .saturating_sub(write_workers)
+            .max(1);
+
         (read_workers, tokenize_workers, write_workers)
     }
 
@@ -99,7 +101,7 @@ impl Config {
             input_dir: a.input_dir.clone(),
             pattern: a.pattern.clone(),
             output_prefix: a.output_prefix.clone(),
-            text_cols: a.text_cols.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            text_cols: Vec::new(),
             doc_boundary: a.doc_boundary,
             concat_sep: a.concat_sep.clone(),
             tokenizer: a.tokenizer.clone(),
