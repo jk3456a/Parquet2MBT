@@ -1,5 +1,6 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use crossbeam_channel::bounded;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,17 @@ impl Drop for EnvVarGuard {
             None => std::env::remove_var(&self.key),
         }
     }
+}
+
+/// 解析数据集名称：取 Parquet 文件的直接父目录名作为数据集名（l1）。
+/// 允许 l0 与 l1 之间存在任意中间目录；若无法取得父目录名则返回 "root"。
+fn derive_dataset_name(file_path: &Path, _input_root: &str) -> String {
+    file_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "root".to_string())
 }
 
 /// 流水线调度器 - 纯协调器，不包含业务逻辑
@@ -180,11 +192,14 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     let write_handles: Vec<_> = (0..write_workers).map(|worker_id| {
         let tokenize_rx = tokenize_rx.clone();
         let output_prefix = cfg.output_prefix.clone();
+        let input_root = cfg.input_dir.clone();
         let no_write = cfg.no_write;
         let metrics = metrics.clone();
         
         std::thread::spawn(move || -> Result<usize> {
             let mut docs_written = 0;
+            // dataset -> personal rotating writer
+            let mut dataset_writers: HashMap<String, RotatingWriterPool> = HashMap::new();
             
             if no_write {
                 // no-write 模式：仅消费数据
@@ -196,28 +211,33 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
                 return Ok(docs_written);
             }
 
-            // 每个worker独享自己的轮转写入器 - 完全无锁！
-            let mut personal_writer = RotatingWriterPool::new(
-                output_prefix,
-                1, // 每个pool只管理1个worker
-                max_shard_bytes,
-                dtype,
-                metrics.clone(),
-                worker_id, // 作为全局 worker 偏移，保证文件名不冲突
-            )?;
-            
-            tracing::debug!("Write worker {} started with personal rotating writer", worker_id);
+            tracing::debug!("Write worker {} started with per-dataset rotating writers", worker_id);
             
             while let Ok(batch) = tokenize_rx.recv() {
-                // 无锁批量写入！
-                for tokens in batch.token_data.iter() {
-                    personal_writer.write_document(0, tokens)?; // 本地 id=0，但文件名用全局偏移
+                // 基于源文件路径解析数据集
+                let ds = derive_dataset_name(&batch.file_path, &input_root);
+                // 获取或创建该数据集的写入器
+                if !dataset_writers.contains_key(&ds) {
+                    let ds_prefix = format!("{}.{}", output_prefix, ds);
+                    let writer = RotatingWriterPool::new(
+                        ds_prefix,
+                        1,
+                        max_shard_bytes,
+                        dtype,
+                        metrics.clone(),
+                        worker_id,
+                    )?;
+                    dataset_writers.insert(ds.clone(), writer);
                 }
+
+                let writer = dataset_writers.get_mut(&ds).expect("writer must exist");
+                // 无锁批量写入：该数据集独立的 writer
+                for tokens in batch.token_data.iter() { writer.write_document(0, tokens)?; }
                 docs_written += batch.doc_lens.len();
             }
             
-            // 完成时finalize个人写入器
-            let _results = personal_writer.finalize_all()?;
+            // 完成时 finalize 所有数据集写入器
+            for (_ds, writer) in dataset_writers.into_iter() { let _ = writer.finalize_all()?; }
             
             tracing::debug!("Write worker {} finished", worker_id);
             Ok(docs_written)
