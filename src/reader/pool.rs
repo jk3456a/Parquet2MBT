@@ -140,7 +140,7 @@ impl ReaderPool {
         let messages_idx = schema.column_with_name("messages").map(|(i, _)| i);
 
         if content_idx.is_none() && messages_idx.is_none() {
-            anyhow::bail!("未找到可用的文本列；请通过 --text-cols 指定列名");
+            anyhow::bail!("未发现文本列：需要列名 'content' 或 'messages'");
         }
 
         // 显式迭代 reader.next() 来准确计量 Parquet 解码/拉取一批的耗时

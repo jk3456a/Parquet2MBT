@@ -41,48 +41,19 @@ impl TokenizerPool {
             "Starting tokenizer pool"
         );
 
-        let handles = if cfg.no_tokenize {
-            // no_tokenize 模式: 启动一个直通worker，仅做数据透传
-            vec![Self::spawn_passthrough_worker(input_rx, output_tx)]
-        } else {
-            // 多线程 worker 池
-            Self::spawn_workers(
-                tokenize_workers,
-                tokenizer,
-                dtype,
-                metrics,
-                input_rx,
-                output_tx,
-            )
-        };
+        let handles = Self::spawn_workers(
+            tokenize_workers,
+            tokenizer,
+            dtype,
+            metrics,
+            input_rx,
+            output_tx,
+        );
 
         Ok(Self { handles })
     }
 
-    fn spawn_passthrough_worker(
-        input_rx: Receiver<ReadBatch>,
-        output_tx: Sender<TokenizedBatch>,
-    ) -> JoinHandle<Result<()>> {
-        std::thread::spawn(move || -> Result<()> {
-            tracing::debug!("Passthrough tokenizer worker started (no-tokenize mode)");
-            
-            while let Ok(read_batch) = input_rx.recv() {
-                // 模拟一个空的tokenize结果
-                let tokenized_batch = TokenizedBatch {
-                    doc_lens: vec![0; read_batch.texts.len()], // 每个文档长度为0
-                    token_data: vec![vec![]; read_batch.texts.len()], // 无token数据
-                    file_path: read_batch.file_path,
-                };
-                
-                if output_tx.send(tokenized_batch).is_err() {
-                    break; // 下游已关闭
-                }
-            }
-            
-            tracing::debug!("Passthrough tokenizer worker finished");
-            Ok(())
-        })
-    }
+    
 
     fn spawn_workers(
         tokenize_workers: usize,

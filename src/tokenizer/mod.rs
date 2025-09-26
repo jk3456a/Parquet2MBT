@@ -14,11 +14,6 @@ impl Tok {
         Ok(Self { inner })
     }
 
-    pub fn dummy() -> Self {
-        // 创建一个空的tokenizer用于no_tokenize模式
-        let tokenizer = Tokenizer::new(tokenizers::models::bpe::BPE::default());
-        Self { inner: tokenizer }
-    }
 
     pub fn encode_batch_ids(&self, texts: &[String], add_special: bool) -> Result<Vec<Vec<u32>>> {
         let inputs: Vec<EncodeInput> = texts.iter().map(|t| t.as_str().into()).collect();

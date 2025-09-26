@@ -61,22 +61,12 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     // Worker分配：支持手动指定或自动分配
     let write_workers = cfg.write_workers.unwrap_or(2);
     
-    let (read_workers, tokenize_workers) = if cfg.no_tokenize {
-        // 无分词模式: 尊重手动指定的read_workers，tokenize_workers 为 0
-        let read_w = if let Some(manual_read) = cfg.read_workers {
-            manual_read.min(file_count).max(1)
-        } else {
-            cfg.workers.saturating_sub(write_workers).max(1).min(file_count)
-        };
-        (read_w, 0)
-    } else {
-        // 正常模式
+    let (read_workers, tokenize_workers) = {
         let read_w = if let Some(manual_read) = cfg.read_workers {
             manual_read.min(file_count).max(1)
         } else {
             4.min(file_count)  // 默认4个read workers
         };
-        
         let tokenize_w = if let Some(manual_tokenize) = cfg.tokenize_workers {
             manual_tokenize.max(1)
         } else {
@@ -107,8 +97,7 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
     }
     
     // 根据CPU与外部tokenize worker数智能配置tokenizers内部并行，避免过度订阅
-    // 单文件或外部tokenize worker不多时，开启内部并行；
-    // 多文件+大量外部worker时关闭，避免过度订阅
+    // 单文件或外部tokenize worker不多时，开启内部并行；多文件+大量外部worker时关闭
     let enable_tokenizer_parallel = (file_count == 1)
         || (tokenize_workers <= (cpu_cores / 2).max(1));
     let _env_guard = EnvVarGuard::new(
@@ -121,30 +110,22 @@ pub fn run(cfg: Config, files: Vec<PathBuf>) -> Result<()> {
         read_workers, tokenize_workers, write_workers, cpu_cores
     );
 
-    // 初始化 tokenizer（no_tokenize 时使用 dummy 以复用 Pool）
-    let tok = if cfg.no_tokenize {
-        Arc::new(Tok::dummy())
-    } else {
-        let tpath = &cfg.tokenizer;
-        let tk = Tok::from_path(tpath)?;
-        let vs = tk.vocab_size(true);
-        tracing::info!(tokenizer_path = tpath.as_str(), vocab_size = vs, "tokenizer loaded");
-        Arc::new(tk)
-    };
+    // 初始化 tokenizer
+    let tpath = &cfg.tokenizer;
+    let tk = Tok::from_path(tpath)?;
+    let vs = tk.vocab_size(true);
+    tracing::info!(tokenizer_path = tpath.as_str(), vocab_size = vs, "tokenizer loaded");
+    let tok = Arc::new(tk);
 
     // 选择 dtype（auto 基于词表规模）
     let dtype = match cfg.dtype {
         DType::U16 => IdxDType::U16,
         DType::I32 => IdxDType::I32,
         DType::Auto => {
-            if cfg.no_tokenize {
-                IdxDType::U16
-            } else {
-                let vs = tok.vocab_size(true);
-                let inferred = if vs < 65500 { IdxDType::U16 } else { IdxDType::I32 };
-                tracing::info!(vocab_size = vs, inferred_dtype = match inferred { IdxDType::U16 => "u16", IdxDType::I32 => "i32" }, "dtype auto selection");
-                inferred
-            }
+            let vs = tok.vocab_size(true);
+            let inferred = if vs < 65500 { IdxDType::U16 } else { IdxDType::I32 };
+            tracing::info!(vocab_size = vs, inferred_dtype = match inferred { IdxDType::U16 => "u16", IdxDType::I32 => "i32" }, "dtype auto selection");
+            inferred
         }
     };
 

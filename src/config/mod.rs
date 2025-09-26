@@ -7,8 +7,6 @@ pub struct Config {
     pub input_dir: String,
     pub pattern: String,
     pub output_prefix: String,
-    // 已弃用：保留字段避免破坏序列化兼容；不再使用 text_cols。
-    pub text_cols: Vec<String>,
     pub doc_boundary: DocBoundary,
     pub concat_sep: String,
     pub tokenizer: String,
@@ -24,7 +22,6 @@ pub struct Config {
     pub resume: bool,
     pub metrics_interval: u64,
     pub no_write: bool,
-    pub no_tokenize: bool,
     pub target_shard_size_mb: usize,
 }
 
@@ -101,7 +98,6 @@ impl Config {
             input_dir: a.input_dir.clone(),
             pattern: a.pattern.clone(),
             output_prefix: a.output_prefix.clone(),
-            text_cols: Vec::new(),
             doc_boundary: a.doc_boundary,
             concat_sep: a.concat_sep.clone(),
             tokenizer: a.tokenizer.clone(),
@@ -117,7 +113,6 @@ impl Config {
             resume: a.resume,
             metrics_interval: a.metrics_interval,
             no_write: a.no_write,
-            no_tokenize: a.no_tokenize,
             target_shard_size_mb: a.target_shard_size_mb,
         })
     }

@@ -76,10 +76,6 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub no_write: bool,
 
-    /// 不执行分词，仅做读/预处理与指标（可与no-write组合测试纯IO）
-    #[arg(long, default_value_t = false)]
-    pub no_tokenize: bool,
-
     /// 目标分片大小（MB），达到后轮转生成下一个 .bin/.idx 分片
     #[arg(long, value_name = "MB", default_value_t = 2048)]
     pub target_shard_size_mb: usize,
