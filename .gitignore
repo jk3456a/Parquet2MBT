@@ -25,6 +25,8 @@ Thumbs.db
 *.log
 
 # Test output files
+testdata/
+test_96core_env/
 testdata/output/*.bin
 testdata/output/*.idx
 testdata/logs/*.log
