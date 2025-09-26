@@ -2,7 +2,8 @@
 set -euo pipefail
 
 APP_NAME="parquet2mbt"
-TARGET_TRIPLE="x86_64-unknown-linux-musl"
+HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p' || true)"
+TARGET_TRIPLE="${TARGET_TRIPLE:-$HOST_TRIPLE}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
@@ -31,24 +32,13 @@ get_version() {
 }
 
 ensure_tools() {
-  if ! rustup target list --installed | grep -q "^${TARGET_TRIPLE}$"; then
-    rustup target add "$TARGET_TRIPLE"
-  fi
-  if ! command -v musl-gcc >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update -y && sudo apt-get install -y musl-tools
-    else
-      echo "musl-gcc not found. Please install musl-tools (e.g., sudo apt-get install musl-tools)." >&2
-      exit 1
-    fi
-  fi
+  command -v cargo >/dev/null 2>&1 || { echo "cargo not found. Please install Rust toolchain." >&2; exit 1; }
+  command -v rustc >/dev/null 2>&1 || { echo "rustc not found. Please install Rust toolchain." >&2; exit 1; }
 }
 
-build_musl() {
-  export PKG_CONFIG_ALLOW_CROSS=1
-  export OPENSSL_STATIC=1
-  cargo build --release --target "$TARGET_TRIPLE"
-  local bin="target/${TARGET_TRIPLE}/release/${APP_NAME}"
+build_release() {
+  cargo build --release
+  local bin="target/release/${APP_NAME}"
   if [[ ! -f "$bin" ]]; then
     echo "Build failed: $bin not found" >&2
     exit 1
@@ -58,12 +48,6 @@ build_musl() {
   elif command -v strip >/dev/null 2>&1; then
     strip -s "$bin" || true
   fi
-  if ! file "$bin" | grep -qi 'statically linked'; then
-    echo "Error: binary is not statically linked." >&2
-    file "$bin" || true
-    ldd "$bin" || true
-    exit 1
-  fi
 }
 
 package_artifacts() {
@@ -71,7 +55,7 @@ package_artifacts() {
   local dist="dist"
   mkdir -p "$dist"
   local base="${APP_NAME}-${version}-${TARGET_TRIPLE}"
-  cp "target/${TARGET_TRIPLE}/release/${APP_NAME}" "${dist}/${base}"
+  cp "target/release/${APP_NAME}" "${dist}/${base}"
   (cd "$dist" && sha256sum "$base" > "${base}.sha256")
   tar -C "$dist" -czf "${dist}/${base}.tar.gz" "$base"
 }
@@ -113,7 +97,7 @@ main() {
   fi
   verify_clean
   ensure_tools
-  build_musl
+  build_release
   package_artifacts "$version"
   push_git "$version"
   create_github_release "$version"
