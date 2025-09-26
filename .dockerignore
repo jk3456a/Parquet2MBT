@@ -1,0 +1,20 @@
+# Git
+.git
+.gitignore
+
+# Rust target
+/target
+
+# Python cache
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Test data and outputs
+/testdata
+/test_96core_env
+/wind_tunnel
+
+# Local files
+*.log
+.DS_Store
