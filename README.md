@@ -69,7 +69,9 @@
   --write-workers 2
 ```
 
-## 快速开始（推荐使用Docker）
+## 快速开始（两种方式）
+
+### 方法一：使用 Docker
 
 ### 1. 构建Docker镜像
 ```bash
@@ -94,6 +96,21 @@ docker run --rm --init \
   --input-dir /data \
   --tokenizer /models/tokenizer.json \
   --output-prefix /out/dataset
+```
+
+### 方法二：使用预编译二进制（推荐）
+
+1. 前往 Releases 页面下载与你平台匹配的二进制：
+   - `parquet2mbt`
+2. 校验与赋权并运行：
+```bash
+chmod +x parquet2mbt
+
+# 最小示例
+./parquet2mbt \
+  --input-dir /data/corpus \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /output/corpus
 ```
 
 ## 主要参数概览
