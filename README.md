@@ -110,6 +110,66 @@ docker run --rm --init \
 
 ---
 
+## 数据集组织结构与列要求
+
+### 目录与文件
+- **输入目录**：通过 `--input-dir` 指定，工具会对该目录进行递归扫描。
+- **文件匹配**：通过 `--pattern` 指定，默认 `*.parquet`，仅匹配文件名（不匹配完整路径）。
+- **稳定顺序**：扫描到的文件会进行字典序排序，确保多次运行具有稳定顺序。
+
+- **数据总路径（corpus root）**：包含多个数据集的顶层目录。将 `--input-dir` 指向该目录时，会递归读取其下所有匹配的 Parquet 文件，并合并处理到同一输出前缀中。
+- **数据集路径（dataset）**：单个数据集所在目录。将 `--input-dir` 指向该目录时，仅处理该数据集（同样递归其子目录）。
+- **合并行为**：无论是指向数据总路径还是单个数据集，所有读取到的样本会按扫描顺序被编码并写入同一组 `<prefix>.bin/.idx`（含分片轮转）。如需区分不同数据集，建议分别运行，使用不同的 `--output-prefix`。
+
+### 支持的列模式（二选一，优先使用 chatml/messages）
+- **ChatML 消息列表（推荐）**：列名为 `messages`，Arrow 类型需为 `List<Struct{ role: Utf8/LargeUtf8, content: Utf8/LargeUtf8 }>` 或其 LargeList 变体。
+  - 每行表示一段对话，内部元素为包含 `role` 与 `content` 的结构体。
+  - 渲染格式：每条消息转换为 `<|im_start|>{role}\n{content}<|im_end|>\n` 并顺序拼接。
+  - 字段名大小写不敏感，但需能解析为 `role` 与 `content`。
+- **纯文本列**：列名为 `content`，类型为 `Utf8/LargeUtf8` 或 `Binary/LargeBinary`（二进制将按 UTF-8 解码）。
+
+若同一文件同时含有 `messages` 与 `content`，将优先使用 `messages`；当两者都不存在时，工具会报错并中止：`未发现文本列：需要列名 'content' 或 'messages'`。
+
+### 拼接与文档边界
+- **多列拼接**：当前实现默认选择 `messages` 或 `content` 单列作为文本来源；若需多列拼接，建议在上游预处理为单列 `content`（可使用 `--concat-sep` 控制拼接分隔符的下游表现）。
+- **文档边界 `--doc-boundary`**：当前按行（Row）处理；`File` 模式为预留选项，不改变现有分词粒度。
+- **换行规整**：默认会将连续≥3个换行压缩为2个（可通过环境变量 `P2MBT_COLLAPSE_NEWLINES=0` 关闭）。
+
+### 最小可用示例
+```
+data_root
+ ├─ dataset_a/
+ │   ├─ 0001.parquet
+ │   └─ 0002.parquet
+ └─ dataset_b/
+     ├─ part-0001.parquet
+     └─ part-0002.parquet
+
+# 递归读取 data_root 下所有匹配文件，并合并写入同一输出前缀，但是会在前缀后有数据集的区分，表现为用'.'分隔
+parquet2mbt \
+  --input-dir ./data_root \
+  --tokenizer ./testdata/tokenizer.json \
+  --output-prefix ./output/all_datasets
+
+output
+ ├─ all_datasets.dataset_a.shard_00_00001.bin
+ ├─ all_datasets.dataset_a.shard_00_00001.idx
+ ├─ all_datasets.dataset_a.shard_01_00001.bin
+ ├─ all_datasets.dataset_a.shard_01_00001.idx
+ ├─ all_datasets.dataset_b.shard_00_00001.bin
+ ├─ all_datasets.dataset_b.shard_00_00001.idx
+ ├─ all_datasets.dataset_b.shard_01_00001.bin
+ └─ all_datasets.dataset_b.shard_01_00001.idx
+
+```
+
+### 常见问题
+- **列名不叫 content/messages 可以吗？** 当前需要列名严格为 `content` 或 `messages`；请在数据准备阶段重命名列。
+- **messages 的元素结构字段顺序不一致？** 只要字段名能识别为 `role` 与 `content` 即可，顺序无关；大小写不敏感。
+- **二进制内容如何处理？** 将按 UTF-8 解码（无效字节替换）；如需精准控制请在上游转换为 Utf8。
+
+---
+
 ## 本地构建（面向开发者）
 
 ```bash
