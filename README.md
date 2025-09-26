@@ -1,6 +1,6 @@
 # Parquet2MBT
 
-一个高性能的Parquet到Megatron二进制格式转换工具，专为大规模语言模型训练数据预处理而设计。
+一个高性能的Parquet到Megatron二进制格式 (Megatron Binary Type, MBT) 转换工具，专为大规模语言模型训练数据预处理而设计。
 
 ## 功能特性
 
@@ -19,9 +19,9 @@
 - **分词器**: 标准中文分词器 (~100K词汇表)
 
 ### 性能表现
-- **峰值性能**: **155.2M tokens/s** (稳定状态)
-- **最优配置**: 4读取 + 122分词 + 2写入 workers
-- **I/O吞吐量**: 517 MB/s 输入，580 MB/s 输出
+- **峰值性能**: **151.6M tokens/s** (稳定状态)
+- **最优配置**: 5读取 + 120分词 + 3写入 workers (在128核CPU, batch-size=2048环境下)
+- **I/O吞吐量**: 411.9 MB/s 输入, 578.2 MB/s 输出 (峰值性能区间)
 
 ### 时间估算
 
@@ -46,24 +46,22 @@
 # 系统会自动检测CPU核心数并应用最优配置
 ./target/release/parquet2mbt \
   --input-dir /data/corpus \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
   --output-prefix /output/corpus
 ```
 
 **分层自适应分配策略**（基于性能测试数据）:
-- **0-32核**: 1读取 + 1写入 + 剩余分词
-- **33-64核**: 2读取 + 1写入 + 剩余分词  
-- **65-96核**: 3读取 + 2写入 + 剩余分词
-- **97-128核**: 4读取 + 2写入 + 剩余分词
-- **128+核**: 按比例分配（约3%读取 + 1.5%写入 + 95.5%分词）
+- **0-32核**: 2读取 + 1写入 + 剩余分词
+- **33-64核**: 3读取 + 1写入 + 剩余分词
+- **65-96核**: 4读取 + 2写入 + 剩余分词
+- **97-160核**: 6读取 + 2写入 + 剩余分词
+- **160+核**: 按比例分配（读/写worker有上限，避免过度分配）
 
 **高级用户** 仍可手动指定worker数量来覆盖自动配置：
 ```bash
 # 手动指定（仅在特殊需求时使用）
 ./target/release/parquet2mbt \
   --input-dir /data/corpus \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
   --output-prefix /output/corpus \
   --read-workers 4 \
@@ -71,83 +69,71 @@
   --write-workers 2
 ```
 
-## 快速开始
+## 快速开始（推荐使用Docker）
 
-### 安装
+### 1. 构建Docker镜像
+```bash
+docker build -t parquet2mbt:latest -f deploy/docker/Dockerfile .
+```
+> **提示**: 如遇权限问题，请先将当前用户加入 `docker` 组。
+
+### 2. 运行转换任务
+```bash
+# 准备本地目录
+DATA_DIR=/path/to/your/parquet_files
+OUT_DIR=/path/to/your/output_dir
+TOKENIZER=/path/to/your/tokenizer.json
+
+# 使用Docker运行
+docker run --rm --init \
+  -v "$DATA_DIR":/data:ro \
+  -v "$OUT_DIR":/out \
+  -v "$TOKENIZER":/models/tokenizer.json:ro \
+  parquet2mbt:latest \
+  parquet2mbt \
+  --input-dir /data \
+  --tokenizer /models/tokenizer.json \
+  --output-prefix /out/dataset
+```
+
+## 主要参数概览
+
+仅列出最核心的参数，**所有参数的详细说明请参见 [用户指南](doc/user_guide.md)**。
+
+- `--input-dir <PATH>`: **(必需)** 输入Parquet文件所在目录
+- `--output-prefix <PATH>`: **(必需)** 输出文件前缀
+- `--tokenizer <PATH>`: **(必需)** Tokenizer文件路径
+- `--batch-size <INT>`: 批处理大小，影响内存与性能
+- `--target-shard-size-mb <MB>`: 输出分片的目标大小（MB）
+- `--no-write`: 测试模式，不产生输出文件
+- `--help`: 显示全部参数
+
+---
+
+## 本地构建（面向开发者）
 
 ```bash
-# 克隆仓库
+# 1. 克隆仓库
 git clone https://github.com/jk3456a/Parquet2MBT.git
 cd Parquet2MBT
 
-# 构建发布版本
+# 2. 编译
 cargo build --release
+
+# 3. 运行
+./target/release/parquet2mbt --help
 ```
 
-### 基本用法
-
-```bash
-./target/release/parquet2mbt \
-  --input-dir /data/corpus \
-  --pattern "*.parquet" \
-  --text-cols content,title \
-  --tokenizer /path/to/tokenizer.json \
-  --output-prefix /data/out/corpus
-```
-
-**注意**: 新版本采用智能worker分配，无需手动指定参数，系统会根据CPU核心数自动选择最优配置：
-- **总线程数**: CPU核数
-- **读取线程**: 2-4个（根据CPU核数自适应）
-- **分词线程**: 大部分核心（80-90%）
-- **写入线程**: 1-2个（根据CPU核数自适应）
-- **批处理大小**: 8192
-
-## 主要参数
-
-### 必需参数
-- `--input-dir <PATH>`: 输入目录路径（支持递归扫描）
-- `--text-cols <COLS>`: 要提取的文本列名，逗号分隔（如：`title,content`）
-- `--tokenizer <PATH>`: HuggingFace tokenizer文件路径（`.json`或`.model`）
-- `--output-prefix <PATH>`: 输出文件前缀（生成`<prefix>.bin`和`<prefix>.idx`）
-
-### 可选参数
-
-#### 基础配置
-- `--pattern <GLOB>`: 文件匹配模式（默认：`*.parquet`）
-- `--batch-size <INT>`: 批处理大小（默认：8192）
-- `--dtype <TYPE>`: 输出数据类型（`auto|u16|u32`，默认：`auto`）
-- `--doc-boundary <TYPE>`: 文档边界策略（`row|file`，默认：`row`）
-- `--concat-sep <STR>`: 多列拼接分隔符（默认：`\n`）
-- `--metrics-interval <SEC>`: 指标输出间隔秒数（默认：5）
-- `--resume`: 启用断点续传，跳过已完成的文件
-- `--target-shard-size-mb <MB>`: 分片文件大小限制（默认：2048MB）
-
-#### 并行处理配置
-- `--workers <INT>`: 总工作线程数（默认：CPU核数）
-- `--read-workers <INT>`: 读取工作线程数（默认：4）
-- `--tokenize-workers <INT>`: 分词工作线程数（默认：CPU核数-6）
-- `--write-workers <INT>`: 写入工作线程数（默认：2）
-- `--queue-cap <INT>`: 内部队列容量（默认：8）
-
-#### 高级功能
-- `--no-write`: 仅测试模式，不写入文件（用于性能测试）
-- `--no-tokenize`: 跳过分词，仅做读取和预处理（用于I/O测试）
-- `--use-rayon-tokenize`: 启用Rayon在tokenize阶段内部并行化（实验性功能）
-
+---
 
 ## 输出格式
 
-### 标准输出
-工具生成两个文件：
-- `<prefix>.bin`: 包含所有token ID的二进制文件
-- `<prefix>.idx`: 文档边界索引文件，兼容Megatron-LM格式
+工具会生成与[Megatron-LM](https://github.com/NVIDIA/Megatron-LM)完全兼容的 `.bin` 和 `.idx` 文件。
 
-### 分片输出（多Write Worker）
-当使用多个Write Worker时，生成分片文件：
-- `<prefix>.shard_00_00001.bin`, `<prefix>.shard_01_00001.bin`, ... : 各Worker的分片数据文件
-- `<prefix>.shard_00_00001.idx`, `<prefix>.shard_01_00001.idx`, ... : 对应的索引文件
+- `<prefix>.bin`: 包含所有Token ID的二进制数据。
+- `<prefix>.idx`: 索引文件，记录每个文档在 `.bin` 文件中的偏移量。
 
-分片文件命名规则：`shard_{worker_id}_{sequence}.{bin|idx}`
+当使用多个写入线程时，会自动生成分片文件，如 `<prefix>.shard_00_00001.bin`。
 
 ## 性能监控
 
@@ -168,8 +154,7 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 ```bash
 ./target/release/parquet2mbt \
   --input-dir ./testdata/data \
-  --text-cols content \
-  --tokenizer ./testdata/tokenizer/tokenizer.json \
+  --tokenizer ./testdata/tokenizer.json \
   --output-prefix ./output/dataset
 ```
 
@@ -177,7 +162,6 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 ```bash
 ./target/release/parquet2mbt \
   --input-dir /data/books \
-  --text-cols message,content \
   --concat-sep "\n\n" \
   --tokenizer /models/tokenizer.json \
   --output-prefix /output/books_dataset \
@@ -189,15 +173,12 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 # 使用默认配置（推荐）
 ./target/release/parquet2mbt \
   --input-dir /data/corpus \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
-  --output-prefix /output/corpus \
-  --target-shard-size-mb 2048
+  --output-prefix /output/corpus 
 
 # 或手动指定（高级用户）
 ./target/release/parquet2mbt \
   --input-dir /data/corpus \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
   --output-prefix /output/corpus \
   --read-workers 4 \
@@ -212,16 +193,14 @@ files: 15/100, batches: 1250, records: 1.2M, tokens: 245.8M, input: 2.1GB, outpu
 # 纯I/O测试
 ./target/release/parquet2mbt \
   --input-dir /data/test \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
   --output-prefix /tmp/test \
-  --no-tokenize --no-write \
+  --no-write \
   --workers 8
 
 # 完整流水线测试
 ./target/release/parquet2mbt \
   --input-dir /data/test \
-  --text-cols content \
   --tokenizer /models/tokenizer.json \
   --output-prefix /tmp/test \
   --no-write \

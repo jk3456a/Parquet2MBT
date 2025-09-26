@@ -1,190 +1,134 @@
-## Parquet2MBT 使用指南
+## Parquet2MBT 用户指南（详细参数手册）
 
-### 功能概述
+本指南为 `parquet2mbt` 的所有命令行参数提供详尽的解释和使用示例，主要面向需要精细化控制转换过程的高级用户。
 
-- 递归扫描输入目录，按列名投影读取 Parquet（Arrow RecordBatch 流式处理）。
-- 文本预处理：多列拼接、去首尾空白。
-- 批量分词（HF tokenizers），写出 Megatron `.bin/.idx`（dtype: u16/i32/auto）。
-- 指标（stdout）：定期输出读/写带宽、records/s、tokens/s、累计计数。
-- 日志：结构化文本（tracing），支持 `RUST_LOG` 控制级别。
-
-### 安装与构建
-
-```bash
-cargo build --release
-```
-
-可执行文件位置：`./target/release/parquet2mbt`
-
-### 基本用法
-
-```bash
-./target/release/parquet2mbt \
-  --input-dir /data/corpus \
-  --pattern "*.parquet" \
-  --text-cols content,meta \
-  --tokenizer /path/to/tokenizer.json \
-  --output-prefix /data/out/corpus \
-  --batch-size 32768 --workers $(nproc) --dtype auto --doc-boundary row \
-  --metrics-interval 5
-```
+---
 
 ### 参数详细说明
 
-#### 必需参数
-- `--input-dir`：输入目录（递归扫描）
-- `--text-cols`：文本列名，逗号分隔；支持多列拼接
-- `--tokenizer`：HF `tokenizer.json` 或 `sentencepiece.model` 路径
-- `--output-prefix`：输出前缀，生成 `<prefix>.bin/.idx`
+#### 1. 必需参数
 
-#### 基础配置
-- `--pattern`：文件匹配模式（默认 `*.parquet`）
-- `--batch-size`：每批处理的行数（影响吞吐与内存，默认：8192）
-- `--dtype`：`auto|u16|i32`，决定 `.bin` 元素类型（默认：`auto`）
-- `--doc-boundary`：`row|file`，文档边界策略（默认：`row`）
-- `--concat-sep`：多列拼接分隔符（默认 `\n`）
-- `--metrics-interval`：指标输出间隔（秒），`0` 关闭（默认：5）
+- **`--input-dir <PATH>`**
+  - **说明**: 指定包含Parquet文件的输入目录，工具会递归扫描此目录下的所有文件。
+  - **示例**: `--input-dir /mnt/data/my_corpus`
 
-#### 并行处理配置
-- `--workers`：总工作线程数（默认：CPU核数）
-- `--read-workers`：读取工作线程数（默认：4）
-- `--tokenize-workers`：分词工作线程数（默认：CPU核数-6）
-- `--write-workers`：写入工作线程数（默认：2）
-- `--queue-cap`：内部队列容量（默认：8）
+- **`--tokenizer <PATH>`**
+  - **说明**: HuggingFace `tokenizer.json` 或 SentencePiece `.model` 文件的路径。这是执行分词的核心依赖。
+  - **示例**: `--tokenizer /path/to/my_tokenizer.json`
 
-#### 高级功能
-- `--no-write`：仅测试模式，不写入文件（用于性能测试）
-- `--no-tokenize`：跳过分词，仅做读取和预处理（用于I/O测试）
-- `--use-rayon-tokenize`：启用Rayon内部并行化（实验性功能）
-- `--target-shard-size-mb`：分片文件大小限制（默认：2048MB）
-- `--resume`：启用断点续传，跳过已完成的文件
+- **`--output-prefix <PATH>`**
+  - **说明**: 输出文件的前缀。工具会基于此前缀生成 `.bin` 和 `.idx` 文件。
+  - **示例**: `--output-prefix /mnt/output/my_dataset` (将生成 `my_dataset.bin` 和 `my_dataset.idx`)
 
-### 指标说明（stdout）
+---
 
-定期打印如下关键字段：
-- `read_mb_per_sec`：读侧带宽（近似，以文件大小增量估算）。
-- `convert_mb_per_sec`：转换写出带宽（按写入 `.bin` 的实际字节估算）。
-- `records_per_sec`、`tokens_per_sec`：速率。
-- `input_bytes_total`、`output_bytes_total`、`files_total`、`batches_total`、`records_total`、`tokens_total`：累计值。
+#### 2. 基础配置
 
-作业结束后，进程会优雅停止指标线程并退出。
+- **`--pattern <GLOB>`**
+  - **说明**: 用于匹配输入目录中文件的glob模式。
+  - **默认值**: `*.parquet`
+  - **示例**:
+    - 匹配Snappy压缩的Parquet文件: `--pattern "*.snappy.parquet"`
+    - 匹配特定分区: `--pattern "year=2024/*.parquet"`
 
-### 常见问题
+- **`--batch-size <INT>`**
+  - **说明**: 流水线中每个批次处理的记录（行）数。较大的批次可以提高吞吐量，但会增加内存消耗。
+  - **默认值**: `8192`
+  - **示例**: `--batch-size 16384`
 
-1) 没有匹配文件：确认 `--input-dir` 与 `--pattern` 是否正确。
-2) tokenizer 警告（特殊 token 缺失/ID 不一致）：更换为与模型一致的 `tokenizer.json`；或后续引入 `--special-tokens-json` 与严格校验（参考 PRD）。
-3) 带宽为 0：样例数据很小或列名/分词器不匹配导致 tokens 为空；换真实数据与 tokenizer 验证。
-4) 指标过多：设 `--metrics-interval 0` 关闭。
+- **`--dtype <TYPE>`**
+  - **说明**: 输出 `.bin` 文件中Token ID的数据类型。
+  - **可选值**:
+    - `auto`: 根据tokenizer的词汇表大小自动选择（<65535用`u16`，否则用`i32`）。
+    - `u16`: 强制使用16位无符号整数。
+    - `i32`: 强制使用32位有符号整数（兼容旧版Megatron）。
+  - **默认值**: `auto`
+  - **示例**: `--dtype u16`
+
+- **`--doc-boundary <TYPE>`**
+  - **说明**: 定义文档的边界。这影响 `.idx` 文件的生成方式。
+  - **可选值**:
+    - `row`: 将Parquet文件中的每一行视为一个独立的文档。
+    - `file`: 将整个Parquet文件视为一个单独的文档。
+  - **默认值**: `row`
+  - **示例**: `--doc-boundary file`
+
+- **`--concat-sep <STR>`**
+  - **说明**: 当拼接多列文本时使用的分隔符。
+  - **默认值**: `\n` (换行符)
+  - **示例**: 使用两个换行符作为分隔: `--concat-sep "\n\n"`
+
+- **`--metrics-interval <SEC>`**
+  - **说明**: 在标准输出中打印性能指标的时间间隔（秒）。设置为 `0` 可以禁用此功能。
+  - **默认值**: `5`
+  - **示例**: 每10秒更新一次指标: `--metrics-interval 10`
+
+- **`--target-shard-size-mb <MB>`**
+  - **说明**: 输出文件分片的目标大小（MB）。当一个 `.bin` 文件达到此大小后，写入器会自动关闭当前文件并创建新的分片文件。
+  - **默认值**: `2048`
+  - **示例**: `--target-shard-size-mb 4096`
+
+---
+
+#### 3. 并行处理配置
+
+系统会根据CPU核心数自动进行“智能分配”，一般无需手动配置。以下参数仅供高级用户在特殊场景下进行微调。
+
+- **`--workers <INT>`**
+  - **说明**: 流水线使用的总工作线程数。
+  - **默认值**: 系统CPU核心数。
+  - **示例**: `--workers 64`
+
+- **`--read-workers <INT>`**
+  - **说明**: 专门用于读取Parquet文件的工作线程数。
+  - **默认值**: 根据“智能分配”策略决定（通常为2-4个）。
+  - **示例**: `--read-workers 4`
+
+- **`--tokenize-workers <INT>`**
+  - **说明**: 专门用于文本分词的工作线程数。这是CPU密集型任务，通常分配绝大部分核心。
+  - **默认值**: 根据“智能分配”策略决定。
+  - **示例**: `--tokenize-workers 60`
+
+- **`--write-workers <INT>`**
+  - **说明**: 专门用于将处理好的数据写入 `.bin` 和 `.idx` 文件的工作线程数。
+  - **默认值**: 根据“智能分配”策略决定（通常为1-2个）。
+  - **示例**: `--write-workers 2`
+
+- **`--queue-cap <INT>`**
+  - **说明**: 流水线各阶段之间缓冲队列的容量。
+  - **默认值**: `32`
+  - **示例**: `--queue-cap 16`
+
+---
+
+#### 4. 高级功能
+
+- **`--no-write`**
+  - **说明**: 启用测试模式，执行除文件写入外的所有步骤（读取、预处理、分词）。用于性能分析和瓶颈定位。
+  - **示例**: `--no-write`
+
+---
 
 ### 环境变量
 
-#### 日志控制
-```bash
-RUST_LOG=info ./target/release/parquet2mbt ...
-RUST_LOG=debug ./target/release/parquet2mbt ...
-```
+- **`RUST_LOG`**
+  - **说明**: 控制日志的详细级别。
+  - **可选值**: `error`, `warn`, `info`, `debug`, `trace`
+  - **示例**: `RUST_LOG=debug ./target/release/parquet2mbt ...`
 
-#### Rayon并行控制（仅在使用 --use-rayon-tokenize 时生效）
-```bash
-RAYON_NUM_THREADS=4 ./target/release/parquet2mbt --use-rayon-tokenize ...
-```
+---
 
-### 使用示例
+### 工作线程分配策略（智能分配）
 
-#### 基础单列处理
-```bash
-./target/release/parquet2mbt \
-  --input-dir /data/corpus \
-  --pattern "*.snappy.parquet" \
-  --text-cols content \
-  --tokenizer /path/to/tokenizer.json \
-  --output-prefix /data/out/corpus_content
-```
+默认情况下，用户无需关心 `--read-workers`, `--tokenize-workers`, `--write-workers` 的具体数值。系统会基于当前环境的CPU核心数，应用经过性能测试验证的分层自适应策略，以达到最优性能。
 
-#### 高性能生产配置（推荐）
-```bash
-# 使用优化的默认配置（推荐）
-./target/release/parquet2mbt \
-  --input-dir /data/corpus \
-  --text-cols content \
-  --tokenizer /models/tokenizer.json \
-  --output-prefix /output/corpus \
-  --target-shard-size-mb 2048
+- **0-32核**: 2读取 + 1写入 + (N-3)分词
+- **33-64核**: 3读取 + 1写入 + (N-4)分词
+- **65-96核**: 4读取 + 2写入 + (N-6)分词
+- **97-160核**: 6读取 + 2写入 + (N-8)分词
+- **160+核**: 按优化比例分配
 
-# 手动指定配置（高级用户）
-./target/release/parquet2mbt \
-  --input-dir /data/corpus \
-  --text-cols content \
-  --tokenizer /models/tokenizer.json \
-  --output-prefix /output/corpus \
-  --read-workers 4 \
-  --tokenize-workers 122 \
-  --write-workers 2 \
-  --batch-size 8192 \
-  --target-shard-size-mb 2048
-```
-
-#### 性能测试配置
-```bash
-# 纯I/O性能测试
-./target/release/parquet2mbt \
-  --input-dir /data/test \
-  --text-cols content \
-  --tokenizer /models/tokenizer.json \
-  --output-prefix /tmp/test \
-  --no-tokenize --no-write \
-  --workers 8
-
-# 完整流水线性能测试（不写文件）
-./target/release/parquet2mbt \
-  --input-dir /data/test \
-  --text-cols content \
-  --tokenizer /models/tokenizer.json \
-  --output-prefix /tmp/test \
-  --no-write \
-  --read-workers 4 \
-  --tokenize-workers 120 \
-  --write-workers 2
-
-# Rayon并行化测试（实验性）
-RAYON_NUM_THREADS=4 ./target/release/parquet2mbt \
-  --input-dir /data/test \
-  --text-cols content \
-  --tokenizer /models/tokenizer.json \
-  --output-prefix /tmp/test \
-  --use-rayon-tokenize \
-  --workers 64
-```
-
-### 工作线程分配策略
-
-#### 自动分配（推荐）
-```bash
-# 使用优化的默认配置，无需指定worker参数
-./target/release/parquet2mbt [其他参数]
-```
-
-#### 手动分配（高级用户）
-```bash
-# 基于性能测试的最优配置
-./target/release/parquet2mbt \
-  --read-workers 4 \
-  --tokenize-workers 122 \
-  --write-workers 2 \
-  [其他参数]
-```
-
-**新默认配置说明**：
-- **总线程数**: CPU核数（不再是CPU核数-2）
-- **Read Workers**: 4个（经过优化测试的最佳值）
-- **Tokenize Workers**: CPU核数-6（为read和write预留资源）
-- **Write Workers**: 2个（相比单线程提升2.1%性能）
-- **批处理大小**: 8192（经过测试的最佳值）
-
-**分配原则**：
-- **Read Workers**: 4个通常足够，过多会导致I/O竞争
-- **Tokenize Workers**: 分配大部分CPU核心，这是主要瓶颈
-- **Write Workers**: 2个为最佳，过多会导致磁盘I/O竞争
+**只有在明确知道系统瓶颈并需要手动调优时，才建议手动指定worker数量来覆盖此自动策略。**
 
 
 
