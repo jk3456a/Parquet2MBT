@@ -1,0 +1,14 @@
+input_dir = "/home/lizhen/dataset/zh__CCI4.0-M2-Base-v1-newest_zh_cc-high-loss0__2025091500"
+tokenizer = "./testdata/tokenizer/tokenizer.json"
+pattern = "*.parquet"
+workers = 128
+no_write = false
+bin = "./target/release/parquet2mbt"
+out_dir = "/cache/lizhen/testdata"
+
+# 固定Reader=4，扫描不同的Write Workers
+batch_sizes = [2048, 4096, 8192, 16384]
+read_workers = [4, 5, 6, 7, 8]
+write_workers = [2, 3, 4]
+
+
