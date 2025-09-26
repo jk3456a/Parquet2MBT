@@ -1,7 +1,9 @@
 # Rust build artifacts
 /target/
 **/*.rs.bk
+**/*.rs.backup
 *.pdb
+Cargo.lock
 
 # IDE files
 .vscode/
@@ -26,6 +28,8 @@ Thumbs.db
 testdata/output/*.bin
 testdata/output/*.idx
 testdata/logs/*.log
+testdata/tokenizer/*.json
+testdata/tokenizer/*.model
 
 # Large test data files (>100MB)
 testdata/data/*.parquet
@@ -33,3 +37,4 @@ testdata/data/*.parquet
 # Temporary files
 *.tmp
 *.temp
+
